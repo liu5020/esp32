@@ -17,8 +17,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import sys
+from datetime import datetime
 import uuid
 import urllib.error
 import urllib.request
@@ -27,7 +29,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("stt_config.json")
+DEFAULT_RECORDINGS_DIR = Path(__file__).with_name("recordings")
 CONFIG: dict[str, str] = {}
+RECORDINGS_DIR = DEFAULT_RECORDINGS_DIR
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 
@@ -72,6 +76,22 @@ def print_config_warnings() -> None:
 
     if "..." in api_key:
         print("WARNING: api_key contains '...'. The dashboard masked key cannot be used.", flush=True)
+
+
+def save_recording(wav_bytes: bytes, client_ip: str) -> Path:
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_ip = client_ip.replace(":", "_").replace(".", "-")
+    path = RECORDINGS_DIR / f"{timestamp}_{safe_ip}.wav"
+    path.write_bytes(wav_bytes)
+
+    latest_path = RECORDINGS_DIR / "latest.wav"
+    try:
+        shutil.copyfile(path, latest_path)
+    except OSError:
+        pass
+
+    return path
 
 
 def multipart_form_data(fields: dict[str, str], file_field: str, filename: str, content_type: str, data: bytes) -> tuple[bytes, str]:
@@ -170,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
 
         wav_bytes = self.rfile.read(size)
         print(f"received {len(wav_bytes)} bytes from {self.client_address[0]}", flush=True)
+        saved_path = save_recording(wav_bytes, self.client_address[0])
+        print(f"saved wav: {saved_path}", flush=True)
 
         try:
             text = transcribe_with_openai(wav_bytes)
@@ -200,16 +222,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global CONFIG
+    global CONFIG, RECORDINGS_DIR
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    parser.add_argument("--recordings-dir", default=str(DEFAULT_RECORDINGS_DIR))
     args = parser.parse_args()
 
     config_path = Path(args.config)
     CONFIG = load_config(config_path)
+    RECORDINGS_DIR = Path(args.recordings_dir)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"STT bridge listening on http://{args.host}:{args.port}/stt", flush=True)
@@ -217,6 +241,7 @@ def main() -> int:
     print(f"endpoint={CONFIG.get('transcriptions_url')}", flush=True)
     print(f"model={CONFIG.get('model')} language={CONFIG.get('language') or '(auto)'}", flush=True)
     print(f"api_key={mask_secret(CONFIG.get('api_key', ''))}", flush=True)
+    print(f"recordings_dir={RECORDINGS_DIR}", flush=True)
     print_config_warnings()
     print("Try these health URLs from a browser on this computer:", flush=True)
     print(f"  http://127.0.0.1:{args.port}/health", flush=True)

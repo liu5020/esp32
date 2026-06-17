@@ -27,7 +27,7 @@ static constexpr uint32_t BUTTON_DEBOUNCE_MS = 35;
 
 // Speaker wiring for a MAX98357A-style I2S amplifier module.
 // Do not connect a bare speaker directly to ESP32 GPIO pins.
-static constexpr bool SPEAKER_ENABLED = true;
+static constexpr bool SPEAKER_ENABLED = false;
 static constexpr i2s_port_t SPEAKER_I2S_PORT = I2S_NUM_1;
 static constexpr int SPEAKER_BCLK_PIN = 14;
 static constexpr int SPEAKER_LRC_PIN = 15;

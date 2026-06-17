@@ -59,8 +59,10 @@ Notes:
 - `L/R -> GND` makes the mic output on the left I2S channel.
 - If you wire `L/R -> 3V3`, change `MIC_CHANNEL_FORMAT` in `src/main.cpp` from
   `I2S_CHANNEL_FMT_ONLY_LEFT` to `I2S_CHANNEL_FMT_ONLY_RIGHT`.
-- Do not connect a bare speaker directly to ESP32 GPIO pins. Use a speaker
-  amplifier module such as MAX98357A.
+- Do not connect a bare speaker directly to ESP32 GPIO pins. The 8 ohm / 2 W
+  speaker shown in the project notes needs an amplifier module such as
+  MAX98357A, PAM8403, or NS4168. Speaker beeps are disabled in code until an
+  amplifier module is connected.
 - After flashing, the screen should show `VOICE MIC`, `mic ready`, and a live
   level bar. If the screen is blank, first check whether the firmware actually
   uploaded, then check the screen `BL` pin.
@@ -171,6 +173,12 @@ key on the ESP32.
 
 The screen will show `speak now`, then `thinking`, then `stt ok` if the bridge
 returns recognized text. The transcript is printed in the serial monitor.
+
+The bridge saves every uploaded WAV under `tools/recordings/` and also updates
+`tools/recordings/latest.wav`. Listen to `latest.wav` first when transcription
+quality is poor. If the WAV sounds clean but transcription is wrong, tune the
+STT provider/model. If the WAV is too quiet, noisy, clipped, or full of clicks,
+fix the microphone wiring/gain/conversion first.
 
 If the ESP32 prints `Could not connect to STT server`, check:
 
