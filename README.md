@@ -77,6 +77,7 @@ Open the serial monitor at `921600` baud.
 | `v` | Toggle live volume meter |
 | `w` | Test WiFi and update the screen |
 | `b` | Test the speaker beep |
+| `d` | Fetch a demo sketch from the bridge and show it on the screen |
 | `r` | Record 5 seconds and print a WAV file as Base64 |
 | `s` | Record 5 seconds and send it to the speech-to-text server |
 
@@ -172,13 +173,24 @@ key on the ESP32.
 5. Open serial monitor at `921600`, send `s`, and speak for 5 seconds.
 
 The screen will show `speak now`, then `thinking`, then `stt ok` if the bridge
-returns recognized text. The transcript is printed in the serial monitor.
+returns recognized text. The transcript is printed in the serial monitor. The
+bridge also returns a 160x160 one-bit sketch preview. When the preview is
+present, the ESP32 keeps it on the screen until the next recording or command.
 
 The bridge saves every uploaded WAV under `tools/recordings/` and also updates
 `tools/recordings/latest.wav`. Listen to `latest.wav` first when transcription
 quality is poor. If the WAV sounds clean but transcription is wrong, tune the
 STT provider/model. If the WAV is too quiet, noisy, clipped, or full of clicks,
 fix the microphone wiring/gain/conversion first.
+
+The sketch preview is intentionally black-and-white because the same bitmap
+format can later be sent to a thermal printer. The bridge saves generated PBM
+files under `tools/sketches/` and updates `tools/sketches/latest.pbm`. Send `d`
+in the serial monitor to test the screen drawing path without recording audio.
+The current generator is a local rule-based placeholder for common words such
+as cat, dog, house, tree, flower, car, fish, person, mountain, and star. Replace
+that generator with a real image/LLM service once the screen and printer bitmap
+pipeline is stable.
 
 If the ESP32 prints `Could not connect to STT server`, check:
 

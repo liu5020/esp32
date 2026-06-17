@@ -47,6 +47,9 @@ static constexpr size_t DMA_SAMPLES = 512;
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 static constexpr uint32_t STT_RESPONSE_TIMEOUT_MS = 20000;
 static constexpr uint16_t COLOR_DARK_GREY = 0x4208;
+static constexpr uint16_t SKETCH_WIDTH = 160;
+static constexpr uint16_t SKETCH_HEIGHT = 160;
+static constexpr size_t SKETCH_BITMAP_BYTES = (SKETCH_WIDTH * SKETCH_HEIGHT) / 8;
 
 // INMP441 sends 24-bit samples in a 32-bit I2S slot. Lower this value if the
 // recording is too quiet; raise it if the waveform clips.
@@ -64,6 +67,7 @@ static bool speakerReady = false;
 static bool buttonStableState = HIGH;
 static bool buttonLastReading = HIGH;
 static uint32_t buttonLastChangeMs = 0;
+static uint8_t sketchBitmap[SKETCH_BITMAP_BYTES];
 
 static Adafruit_ST7789 tft =
     Adafruit_ST7789(TFT_CS_PIN, TFT_DC_PIN, TFT_MOSI_PIN, TFT_SCLK_PIN, TFT_RST_PIN);
@@ -382,6 +386,35 @@ static void showStatus(const char *status, uint16_t color) {
   drawCenteredText(status, 84, color, 2);
 }
 
+static void showSketchBitmap(const uint8_t *bitmap, uint16_t width, uint16_t height) {
+  int16_t x0 = (tft.width() - width) / 2;
+  int16_t y0 = 92;
+
+  tft.fillScreen(ST77XX_BLACK);
+  drawCenteredText("AI SKETCH", 18, ST77XX_CYAN, 2);
+  drawCenteredText("preview", 48, ST77XX_WHITE, 1);
+
+  tft.fillRect(x0 - 3, y0 - 3, width + 6, height + 6, COLOR_DARK_GREY);
+  tft.fillRect(x0, y0, width, height, ST77XX_WHITE);
+
+  for (uint16_t y = 0; y < height; y++) {
+    for (uint16_t x = 0; x < width; x++) {
+      size_t bitIndex = static_cast<size_t>(y) * width + x;
+      uint8_t mask = 1 << (7 - (bitIndex % 8));
+      if ((bitmap[bitIndex / 8] & mask) != 0) {
+        tft.drawPixel(x0 + x, y0 + y, ST77XX_BLACK);
+      }
+    }
+  }
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(20, 274);
+  tft.print("BTN13=new sketch");
+  tft.setCursor(20, 292);
+  tft.print("d=demo  v=meter");
+}
+
 static uint8_t wifiBarsFromRssi(int32_t rssi) {
   if (rssi >= -55) {
     return 4;
@@ -513,6 +546,7 @@ static void printHelp() {
   Serial.println("  v - toggle live volume meter");
   Serial.println("  w - test WiFi and update the screen");
   Serial.println("  b - test speaker beep");
+  Serial.println("  d - fetch a demo sketch and show it on the screen");
   Serial.println("  r - record 5 seconds and print WAV Base64");
   Serial.println("  s - record 5 seconds and send to STT server");
   Serial.println("Button:");
@@ -658,8 +692,82 @@ static String httpBodyFromResponse(const String &response) {
   return response.substring(bodyIndex + 4);
 }
 
-static String extractJsonTextField(const String &body) {
-  int keyIndex = body.indexOf("\"text\"");
+static bool showSketchFromJson(const String &body);
+
+static void fetchDemoSketch() {
+  volumeMeterEnabled = false;
+
+  if (isPlaceholderConfig()) {
+    Serial.println("Edit include/secrets.h first so the ESP32 knows the bridge URL.");
+    showStatus("set config", ST77XX_RED);
+    playErrorSound();
+    delay(1200);
+    showReadyScreen();
+    return;
+  }
+
+  if (!connectWiFi()) {
+    playErrorSound();
+    delay(1200);
+    showReadyScreen();
+    return;
+  }
+
+  HttpEndpoint endpoint;
+  if (!parseHttpUrl(STT_SERVER_URL, endpoint)) {
+    showStatus("bad url", ST77XX_RED);
+    playErrorSound();
+    delay(1200);
+    showReadyScreen();
+    return;
+  }
+
+  endpoint.path = "/draw?text=cat";
+  showStatus("draw demo", ST77XX_YELLOW);
+
+  WiFiClient client;
+  if (!client.connect(endpoint.host.c_str(), endpoint.port)) {
+    Serial.println("Could not connect to sketch server.");
+    showStatus("draw offline", ST77XX_RED);
+    playErrorSound();
+    delay(1200);
+    showReadyScreen();
+    return;
+  }
+
+  client.printf("GET %s HTTP/1.1\r\n", endpoint.path.c_str());
+  client.printf("Host: %s:%u\r\n", endpoint.host.c_str(), endpoint.port);
+  client.print("Accept: application/json\r\n");
+  client.print("Connection: close\r\n");
+  client.print("\r\n");
+
+  String response = readHttpResponse(client, STT_RESPONSE_TIMEOUT_MS);
+  client.stop();
+
+  String body = httpBodyFromResponse(response);
+  body.trim();
+  Serial.println("Sketch demo response:");
+  Serial.println(body);
+
+  if (showSketchFromJson(body)) {
+    Serial.println("Demo sketch is on the screen. Press BTN13 or s for a new voice sketch.");
+    playOkSound();
+  } else {
+    showStatus("draw error", ST77XX_RED);
+    playErrorSound();
+    delay(1200);
+    showReadyScreen();
+  }
+
+  Serial.println("Volume meter stays off. Press v to enable it again.");
+}
+
+static String extractJsonStringField(const String &body, const char *fieldName) {
+  String key = "\"";
+  key += fieldName;
+  key += "\"";
+
+  int keyIndex = body.indexOf(key);
   if (keyIndex < 0) {
     return "";
   }
@@ -700,6 +808,105 @@ static String extractJsonTextField(const String &body) {
   }
 
   return out;
+}
+
+static int extractJsonIntField(const String &body, const char *fieldName, int fallback) {
+  String key = "\"";
+  key += fieldName;
+  key += "\"";
+
+  int keyIndex = body.indexOf(key);
+  if (keyIndex < 0) {
+    return fallback;
+  }
+
+  int colonIndex = body.indexOf(':', keyIndex);
+  if (colonIndex < 0) {
+    return fallback;
+  }
+
+  int index = colonIndex + 1;
+  while (index < body.length() && (body[index] == ' ' || body[index] == '\t')) {
+    index++;
+  }
+
+  bool negative = false;
+  if (index < body.length() && body[index] == '-') {
+    negative = true;
+    index++;
+  }
+
+  int value = 0;
+  bool foundDigit = false;
+  while (index < body.length() && body[index] >= '0' && body[index] <= '9') {
+    foundDigit = true;
+    value = value * 10 + (body[index] - '0');
+    index++;
+  }
+
+  if (!foundDigit) {
+    return fallback;
+  }
+  return negative ? -value : value;
+}
+
+static String extractJsonTextField(const String &body) {
+  return extractJsonStringField(body, "text");
+}
+
+static int8_t hexNibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + c - 'a';
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + c - 'A';
+  }
+  return -1;
+}
+
+static bool decodeHexBitmap(const String &hex, uint8_t *out, size_t outLength) {
+  if (hex.length() != static_cast<int>(outLength * 2)) {
+    Serial.printf("Sketch bitmap length mismatch: got %d hex chars, expected %u\n",
+                  hex.length(),
+                  static_cast<unsigned>(outLength * 2));
+    return false;
+  }
+
+  for (size_t i = 0; i < outLength; i++) {
+    int8_t high = hexNibble(hex[i * 2]);
+    int8_t low = hexNibble(hex[i * 2 + 1]);
+    if (high < 0 || low < 0) {
+      Serial.println("Sketch bitmap contains a non-hex character.");
+      return false;
+    }
+    out[i] = static_cast<uint8_t>((high << 4) | low);
+  }
+
+  return true;
+}
+
+static bool showSketchFromJson(const String &body) {
+  int width = extractJsonIntField(body, "width", 0);
+  int height = extractJsonIntField(body, "height", 0);
+  String bitmapHex = extractJsonStringField(body, "bitmap");
+
+  if (width != SKETCH_WIDTH || height != SKETCH_HEIGHT || bitmapHex.length() == 0) {
+    Serial.printf("No usable sketch in response. width=%d height=%d bitmap chars=%d\n",
+                  width,
+                  height,
+                  bitmapHex.length());
+    return false;
+  }
+
+  if (!decodeHexBitmap(bitmapHex, sketchBitmap, sizeof(sketchBitmap))) {
+    return false;
+  }
+
+  showSketchBitmap(sketchBitmap, SKETCH_WIDTH, SKETCH_HEIGHT);
+  return true;
 }
 
 static bool streamWavToClient(WiFiClient &client, uint32_t seconds) {
@@ -805,18 +1012,26 @@ static void recordAndSendToStt(uint32_t seconds) {
   Serial.println(body);
 
   String text = extractJsonTextField(body);
+  bool sketchShown = false;
   if (text.length() > 0) {
     Serial.print("Transcript: ");
     Serial.println(text);
-    showStatus("stt ok", ST77XX_GREEN);
+    sketchShown = showSketchFromJson(body);
+    if (!sketchShown) {
+      showStatus("stt ok", ST77XX_GREEN);
+    }
     playOkSound();
   } else {
     showStatus("stt error", ST77XX_RED);
     playErrorSound();
   }
 
-  delay(1500);
-  showReadyScreen();
+  if (!sketchShown) {
+    delay(1500);
+    showReadyScreen();
+  } else {
+    Serial.println("Sketch preview stays on screen. Press BTN13 or s for a new voice sketch.");
+  }
   Serial.println("Volume meter stays off. Press v to enable it again.");
 }
 
@@ -914,6 +1129,10 @@ static void handleSerialCommands() {
     case 'B':
       Serial.println("Speaker beep test");
       playReadySound();
+      break;
+    case 'd':
+    case 'D':
+      fetchDemoSketch();
       break;
     case 'r':
     case 'R':

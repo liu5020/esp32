@@ -5,6 +5,7 @@
 include/secrets.h
 tools/stt_config.json
 tools/recordings/
+tools/sketches/
 
 # Python cache files from the bridge script.
 __pycache__/

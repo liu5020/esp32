@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -23,6 +24,7 @@ import sys
 from datetime import datetime
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -30,8 +32,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DEFAULT_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("stt_config.json")
 DEFAULT_RECORDINGS_DIR = Path(__file__).with_name("recordings")
+DEFAULT_SKETCHES_DIR = Path(__file__).with_name("sketches")
+SKETCH_WIDTH = 160
+SKETCH_HEIGHT = 160
 CONFIG: dict[str, str] = {}
 RECORDINGS_DIR = DEFAULT_RECORDINGS_DIR
+SKETCHES_DIR = DEFAULT_SKETCHES_DIR
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 
@@ -91,6 +97,308 @@ def save_recording(wav_bytes: bytes, client_ip: str) -> Path:
     except OSError:
         pass
 
+    return path
+
+
+class MonoCanvas:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+        self.data = bytearray((width * height + 7) // 8)
+
+    def point(self, x: int, y: int, thickness: int = 1) -> None:
+        radius = max(0, thickness // 2)
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                self._set_pixel(x + dx, y + dy)
+
+    def _set_pixel(self, x: int, y: int) -> None:
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        index = y * self.width + x
+        self.data[index // 8] |= 1 << (7 - (index % 8))
+
+    def line(self, x0: int, y0: int, x1: int, y1: int, thickness: int = 1) -> None:
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+
+        while True:
+            self.point(x0, y0, thickness)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    def rect(self, x: int, y: int, width: int, height: int, thickness: int = 1) -> None:
+        self.line(x, y, x + width - 1, y, thickness)
+        self.line(x, y, x, y + height - 1, thickness)
+        self.line(x + width - 1, y, x + width - 1, y + height - 1, thickness)
+        self.line(x, y + height - 1, x + width - 1, y + height - 1, thickness)
+
+    def polyline(self, points: list[tuple[int, int]], closed: bool = False, thickness: int = 1) -> None:
+        if len(points) < 2:
+            return
+        for start, end in zip(points, points[1:]):
+            self.line(start[0], start[1], end[0], end[1], thickness)
+        if closed:
+            self.line(points[-1][0], points[-1][1], points[0][0], points[0][1], thickness)
+
+    def circle(self, cx: int, cy: int, radius: int, thickness: int = 1) -> None:
+        points: list[tuple[int, int]] = []
+        for step in range(49):
+            angle = (math.tau * step) / 48
+            points.append((round(cx + math.cos(angle) * radius), round(cy + math.sin(angle) * radius)))
+        self.polyline(points, closed=True, thickness=thickness)
+
+    def ellipse(self, cx: int, cy: int, rx: int, ry: int, thickness: int = 1) -> None:
+        points: list[tuple[int, int]] = []
+        for step in range(65):
+            angle = (math.tau * step) / 64
+            points.append((round(cx + math.cos(angle) * rx), round(cy + math.sin(angle) * ry)))
+        self.polyline(points, closed=True, thickness=thickness)
+
+    def arc(self, cx: int, cy: int, rx: int, ry: int, start_deg: int, end_deg: int, thickness: int = 1) -> None:
+        points: list[tuple[int, int]] = []
+        steps = max(8, abs(end_deg - start_deg) // 6)
+        for step in range(steps + 1):
+            deg = start_deg + (end_deg - start_deg) * step / steps
+            angle = math.radians(deg)
+            points.append((round(cx + math.cos(angle) * rx), round(cy + math.sin(angle) * ry)))
+        self.polyline(points, thickness=thickness)
+
+    def to_hex(self) -> str:
+        return self.data.hex()
+
+
+def draw_sun(canvas: MonoCanvas) -> None:
+    canvas.circle(126, 28, 13, 2)
+    for angle in range(0, 360, 45):
+        rad = math.radians(angle)
+        canvas.line(
+            round(126 + math.cos(rad) * 18),
+            round(28 + math.sin(rad) * 18),
+            round(126 + math.cos(rad) * 25),
+            round(28 + math.sin(rad) * 25),
+            1,
+        )
+
+
+def draw_ground(canvas: MonoCanvas) -> None:
+    canvas.line(8, 140, 152, 140, 2)
+    for x in range(18, 148, 18):
+        canvas.line(x, 140, x + 5, 133, 1)
+
+
+def draw_house(canvas: MonoCanvas) -> None:
+    draw_sun(canvas)
+    draw_ground(canvas)
+    canvas.rect(42, 78, 76, 60, 2)
+    canvas.polyline([(36, 80), (80, 42), (124, 80)], thickness=2)
+    canvas.rect(72, 105, 18, 33, 2)
+    canvas.rect(52, 92, 16, 16, 1)
+    canvas.rect(96, 92, 16, 16, 1)
+    canvas.line(60, 92, 60, 108, 1)
+    canvas.line(52, 100, 68, 100, 1)
+
+
+def draw_tree(canvas: MonoCanvas) -> None:
+    draw_sun(canvas)
+    draw_ground(canvas)
+    canvas.rect(73, 90, 15, 50, 2)
+    canvas.circle(80, 64, 27, 2)
+    canvas.circle(59, 78, 24, 2)
+    canvas.circle(101, 78, 24, 2)
+    canvas.line(80, 100, 65, 122, 1)
+    canvas.line(81, 103, 98, 119, 1)
+
+
+def draw_flower(canvas: MonoCanvas) -> None:
+    draw_sun(canvas)
+    draw_ground(canvas)
+    canvas.line(80, 82, 80, 140, 2)
+    canvas.ellipse(65, 112, 18, 7, 1)
+    canvas.ellipse(95, 112, 18, 7, 1)
+    for angle in range(0, 360, 60):
+        rad = math.radians(angle)
+        canvas.ellipse(round(80 + math.cos(rad) * 18), round(65 + math.sin(rad) * 18), 10, 15, 1)
+    canvas.circle(80, 65, 10, 2)
+
+
+def draw_cat(canvas: MonoCanvas) -> None:
+    draw_ground(canvas)
+    canvas.ellipse(80, 101, 30, 37, 2)
+    canvas.circle(80, 65, 32, 2)
+    canvas.polyline([(54, 46), (63, 21), (73, 45)], closed=True, thickness=2)
+    canvas.polyline([(87, 45), (98, 21), (106, 46)], closed=True, thickness=2)
+    canvas.circle(69, 61, 3, 2)
+    canvas.circle(91, 61, 3, 2)
+    canvas.polyline([(77, 72), (83, 72), (80, 77)], closed=True, thickness=1)
+    canvas.arc(72, 78, 8, 8, 10, 90, 1)
+    canvas.arc(88, 78, 8, 8, 90, 170, 1)
+    canvas.line(50, 70, 24, 62, 1)
+    canvas.line(50, 75, 24, 75, 1)
+    canvas.line(50, 80, 25, 89, 1)
+    canvas.line(110, 70, 136, 62, 1)
+    canvas.line(110, 75, 136, 75, 1)
+    canvas.line(110, 80, 135, 89, 1)
+    canvas.arc(113, 108, 31, 28, -70, 95, 2)
+
+
+def draw_dog(canvas: MonoCanvas) -> None:
+    draw_ground(canvas)
+    canvas.ellipse(80, 101, 34, 36, 2)
+    canvas.circle(80, 66, 30, 2)
+    canvas.ellipse(52, 66, 12, 25, 2)
+    canvas.ellipse(108, 66, 12, 25, 2)
+    canvas.circle(69, 62, 3, 2)
+    canvas.circle(91, 62, 3, 2)
+    canvas.ellipse(80, 75, 9, 6, 1)
+    canvas.line(80, 81, 80, 90, 1)
+    canvas.arc(72, 88, 8, 7, 10, 80, 1)
+    canvas.arc(88, 88, 8, 7, 100, 170, 1)
+    canvas.arc(113, 98, 25, 20, -50, 80, 2)
+
+
+def draw_fish(canvas: MonoCanvas) -> None:
+    canvas.line(12, 136, 148, 136, 1)
+    canvas.ellipse(76, 82, 44, 24, 2)
+    canvas.polyline([(118, 82), (148, 58), (148, 106)], closed=True, thickness=2)
+    canvas.circle(48, 77, 3, 2)
+    canvas.arc(73, 84, 18, 13, 210, 330, 1)
+    canvas.line(72, 59, 91, 36, 1)
+    canvas.line(74, 105, 92, 128, 1)
+    for y in (33, 47, 121):
+        canvas.arc(30, y, 12, 5, 200, 340, 1)
+
+
+def draw_car(canvas: MonoCanvas) -> None:
+    draw_sun(canvas)
+    canvas.line(10, 130, 150, 130, 2)
+    canvas.rect(38, 85, 84, 30, 2)
+    canvas.polyline([(54, 85), (70, 62), (96, 62), (112, 85)], thickness=2)
+    canvas.line(80, 62, 80, 85, 1)
+    canvas.circle(55, 119, 12, 2)
+    canvas.circle(105, 119, 12, 2)
+    canvas.circle(55, 119, 4, 1)
+    canvas.circle(105, 119, 4, 1)
+
+
+def draw_person(canvas: MonoCanvas) -> None:
+    draw_sun(canvas)
+    draw_ground(canvas)
+    canvas.circle(80, 49, 20, 2)
+    canvas.line(80, 69, 80, 106, 2)
+    canvas.line(80, 81, 52, 96, 2)
+    canvas.line(80, 81, 108, 96, 2)
+    canvas.line(80, 106, 61, 138, 2)
+    canvas.line(80, 106, 99, 138, 2)
+    canvas.arc(80, 55, 10, 7, 20, 160, 1)
+    canvas.circle(73, 46, 2, 1)
+    canvas.circle(87, 46, 2, 1)
+
+
+def draw_mountain(canvas: MonoCanvas) -> None:
+    draw_sun(canvas)
+    canvas.line(8, 140, 152, 140, 2)
+    canvas.polyline([(16, 139), (62, 58), (105, 139)], thickness=2)
+    canvas.polyline([(67, 139), (110, 78), (148, 139)], thickness=2)
+    canvas.polyline([(51, 78), (62, 58), (73, 78)], thickness=1)
+    canvas.polyline([(99, 94), (110, 78), (122, 95)], thickness=1)
+    canvas.arc(35, 44, 9, 4, 200, 340, 1)
+    canvas.arc(55, 40, 9, 4, 200, 340, 1)
+
+
+def draw_star(canvas: MonoCanvas) -> None:
+    points: list[tuple[int, int]] = []
+    for i in range(10):
+        radius = 46 if i % 2 == 0 else 19
+        angle = math.radians(-90 + i * 36)
+        points.append((round(80 + math.cos(angle) * radius), round(78 + math.sin(angle) * radius)))
+    canvas.polyline(points, closed=True, thickness=2)
+    for x, y in [(34, 40), (126, 38), (43, 124), (119, 121)]:
+        canvas.line(x - 5, y, x + 5, y, 1)
+        canvas.line(x, y - 5, x, y + 5, 1)
+
+
+def draw_generic(canvas: MonoCanvas) -> None:
+    canvas.rect(18, 32, 124, 78, 2)
+    canvas.polyline([(48, 110), (40, 132), (68, 110)], thickness=2)
+    canvas.circle(52, 70, 9, 2)
+    canvas.circle(80, 70, 9, 2)
+    canvas.circle(108, 70, 9, 2)
+    draw_star(canvas)
+
+
+def generate_sketch(text: str) -> dict[str, object]:
+    canvas = MonoCanvas(SKETCH_WIDTH, SKETCH_HEIGHT)
+    lowered = text.lower()
+
+    if any(word in lowered for word in ("房", "屋", "家", "house", "home")):
+        title = "house"
+        draw_house(canvas)
+    elif any(word in lowered for word in ("树", "tree")):
+        title = "tree"
+        draw_tree(canvas)
+    elif any(word in lowered for word in ("花", "flower")):
+        title = "flower"
+        draw_flower(canvas)
+    elif any(word in lowered for word in ("猫", "cat")):
+        title = "cat"
+        draw_cat(canvas)
+    elif any(word in lowered for word in ("狗", "dog")):
+        title = "dog"
+        draw_dog(canvas)
+    elif any(word in lowered for word in ("鱼", "fish")):
+        title = "fish"
+        draw_fish(canvas)
+    elif any(word in lowered for word in ("车", "car")):
+        title = "car"
+        draw_car(canvas)
+    elif any(word in lowered for word in ("人", "小孩", "男孩", "女孩", "person", "boy", "girl")):
+        title = "person"
+        draw_person(canvas)
+    elif any(word in lowered for word in ("山", "mountain")):
+        title = "mountain"
+        draw_mountain(canvas)
+    elif any(word in lowered for word in ("星", "star")):
+        title = "star"
+        draw_star(canvas)
+    else:
+        title = "doodle"
+        draw_generic(canvas)
+
+    return {
+        "width": SKETCH_WIDTH,
+        "height": SKETCH_HEIGHT,
+        "format": "1bpp_hex_msb_black1",
+        "title": title,
+        "bitmap": canvas.to_hex(),
+    }
+
+
+def save_sketch_pbm(sketch: dict[str, object], client_ip: str) -> Path:
+    SKETCHES_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_ip = client_ip.replace(":", "_").replace(".", "-")
+    path = SKETCHES_DIR / f"{timestamp}_{safe_ip}.pbm"
+    width = int(sketch["width"])
+    height = int(sketch["height"])
+    bitmap = bytes.fromhex(str(sketch["bitmap"]))
+    path.write_bytes(f"P4\n{width} {height}\n".encode("ascii") + bitmap)
+
+    latest_path = SKETCHES_DIR / "latest.pbm"
+    try:
+        shutil.copyfile(path, latest_path)
+    except OSError:
+        pass
     return path
 
 
@@ -163,9 +471,20 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ESP32STTBridge/1.0"
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/health":
             self.send_json(200, {"ok": True, "model": CONFIG.get("model", "")})
             return
+
+        if parsed.path == "/draw":
+            query = urllib.parse.parse_qs(parsed.query)
+            text = query.get("text", ["house"])[0]
+            sketch = generate_sketch(text)
+            saved_path = save_sketch_pbm(sketch, self.client_address[0])
+            print(f"demo sketch: {saved_path}", flush=True)
+            self.send_json(200, {"text": text, "image": sketch})
+            return
+
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
@@ -206,7 +525,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         print(f"transcript: {text}", flush=True)
-        self.send_json(200, {"text": text})
+        sketch = generate_sketch(text)
+        saved_sketch_path = save_sketch_pbm(sketch, self.client_address[0])
+        print(f"saved sketch: {saved_sketch_path}", flush=True)
+        self.send_json(200, {"text": text, "image": sketch})
 
     def send_json(self, status: int, payload: dict[str, object]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -222,18 +544,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global CONFIG, RECORDINGS_DIR
+    global CONFIG, RECORDINGS_DIR, SKETCHES_DIR
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--recordings-dir", default=str(DEFAULT_RECORDINGS_DIR))
+    parser.add_argument("--sketches-dir", default=str(DEFAULT_SKETCHES_DIR))
     args = parser.parse_args()
 
     config_path = Path(args.config)
     CONFIG = load_config(config_path)
     RECORDINGS_DIR = Path(args.recordings_dir)
+    SKETCHES_DIR = Path(args.sketches_dir)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"STT bridge listening on http://{args.host}:{args.port}/stt", flush=True)
@@ -242,6 +566,7 @@ def main() -> int:
     print(f"model={CONFIG.get('model')} language={CONFIG.get('language') or '(auto)'}", flush=True)
     print(f"api_key={mask_secret(CONFIG.get('api_key', ''))}", flush=True)
     print(f"recordings_dir={RECORDINGS_DIR}", flush=True)
+    print(f"sketches_dir={SKETCHES_DIR}", flush=True)
     print_config_warnings()
     print("Try these health URLs from a browser on this computer:", flush=True)
     print(f"  http://127.0.0.1:{args.port}/health", flush=True)
