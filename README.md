@@ -5,6 +5,9 @@ status on the ST7789 screen, and exports short 16 kHz / 16-bit / mono WAV
 recordings over Serial. It is meant as a clean base for later AI speech
 recognition.
 
+Project architecture and graduation-design roadmap are recorded in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ## Wiring
 
 The microphone pins are chosen to avoid the TFT screen wiring you already used.
