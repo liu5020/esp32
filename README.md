@@ -33,12 +33,34 @@ Microphone wiring:
 | `SD` | `GPIO12` |
 | `L/R` | `GND` |
 
+Button wiring:
+
+| Button pin | ESP32-S3 pin |
+| --- | --- |
+| one side | `GPIO13` |
+| other side | `GND` |
+
+Speaker wiring, for a MAX98357A I2S amplifier module:
+
+| MAX98357A pin | ESP32-S3 pin |
+| --- | --- |
+| `VIN` / `VCC` | `3V3` or `5V`, depending on your module |
+| `GND` | `GND` |
+| `BCLK` / `BCK` | `GPIO14` |
+| `LRC` / `LRCLK` / `WS` | `GPIO15` |
+| `DIN` | `GPIO21` |
+| speaker `+/-` | connect to the amplifier module output |
+
 Notes:
 
-- Use `3V3`, not `5V`.
+- Use `3V3`, not `5V`, for the INMP441 microphone.
+- Power the MAX98357A module according to its board label/spec. Many boards
+  accept `3V3` or `5V`.
 - `L/R -> GND` makes the mic output on the left I2S channel.
 - If you wire `L/R -> 3V3`, change `MIC_CHANNEL_FORMAT` in `src/main.cpp` from
   `I2S_CHANNEL_FMT_ONLY_LEFT` to `I2S_CHANNEL_FMT_ONLY_RIGHT`.
+- Do not connect a bare speaker directly to ESP32 GPIO pins. Use a speaker
+  amplifier module such as MAX98357A.
 - After flashing, the screen should show `VOICE MIC`, `mic ready`, and a live
   level bar. If the screen is blank, first check whether the firmware actually
   uploaded, then check the screen `BL` pin.
@@ -52,8 +74,12 @@ Open the serial monitor at `921600` baud.
 | `h` | Show help |
 | `v` | Toggle live volume meter |
 | `w` | Test WiFi and update the screen |
+| `b` | Test the speaker beep |
 | `r` | Record 5 seconds and print a WAV file as Base64 |
 | `s` | Record 5 seconds and send it to the speech-to-text server |
+
+Pressing the GPIO13 button also records 5 seconds and sends it to the
+speech-to-text server.
 
 The `r` command prints:
 

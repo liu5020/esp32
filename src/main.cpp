@@ -21,6 +21,20 @@ static constexpr int MIC_SCK_PIN = 10; // INMP441 SCK / BCLK
 static constexpr int MIC_WS_PIN = 11;  // INMP441 WS / LRCLK
 static constexpr int MIC_SD_PIN = 12;  // INMP441 SD / DOUT
 
+// Button wiring: connect one side to GPIO13 and the other side to GND.
+static constexpr int BUTTON_PIN = 13;
+static constexpr uint32_t BUTTON_DEBOUNCE_MS = 35;
+
+// Speaker wiring for a MAX98357A-style I2S amplifier module.
+// Do not connect a bare speaker directly to ESP32 GPIO pins.
+static constexpr bool SPEAKER_ENABLED = true;
+static constexpr i2s_port_t SPEAKER_I2S_PORT = I2S_NUM_1;
+static constexpr int SPEAKER_BCLK_PIN = 14;
+static constexpr int SPEAKER_LRC_PIN = 15;
+static constexpr int SPEAKER_DIN_PIN = 21;
+static constexpr uint32_t SPEAKER_SAMPLE_RATE = 16000;
+static constexpr int16_t SPEAKER_AMPLITUDE = 4500;
+
 // L/R wired to GND means the microphone speaks on the left I2S channel.
 static constexpr i2s_channel_fmt_t MIC_CHANNEL_FORMAT = I2S_CHANNEL_FMT_ONLY_LEFT;
 
@@ -46,6 +60,10 @@ static bool wifiEverTested = false;
 static bool wifiIsConnected = false;
 static int32_t wifiLastRssi = -127;
 static String wifiLastIp = "-";
+static bool speakerReady = false;
+static bool buttonStableState = HIGH;
+static bool buttonLastReading = HIGH;
+static uint32_t buttonLastChangeMs = 0;
 
 static Adafruit_ST7789 tft =
     Adafruit_ST7789(TFT_CS_PIN, TFT_DC_PIN, TFT_MOSI_PIN, TFT_SCLK_PIN, TFT_RST_PIN);
@@ -201,6 +219,120 @@ static void printVolumeBar(uint32_t level) {
   Serial.println('|');
 }
 
+static bool initSpeakerI2S() {
+  if (!SPEAKER_ENABLED) {
+    return false;
+  }
+
+  i2s_config_t i2sConfig;
+  memset(&i2sConfig, 0, sizeof(i2sConfig));
+  i2sConfig.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
+  i2sConfig.sample_rate = SPEAKER_SAMPLE_RATE;
+  i2sConfig.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  i2sConfig.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  i2sConfig.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  i2sConfig.intr_alloc_flags = 0;
+  i2sConfig.dma_buf_count = 4;
+  i2sConfig.dma_buf_len = 128;
+  i2sConfig.use_apll = false;
+
+  esp_err_t err = i2s_driver_install(SPEAKER_I2S_PORT, &i2sConfig, 0, nullptr);
+  if (err != ESP_OK) {
+    Serial.printf("speaker i2s_driver_install failed: %d\n", err);
+    return false;
+  }
+
+  i2s_pin_config_t pinConfig;
+  memset(&pinConfig, 0, sizeof(pinConfig));
+  pinConfig.bck_io_num = SPEAKER_BCLK_PIN;
+  pinConfig.ws_io_num = SPEAKER_LRC_PIN;
+  pinConfig.data_out_num = SPEAKER_DIN_PIN;
+  pinConfig.data_in_num = -1;
+
+  err = i2s_set_pin(SPEAKER_I2S_PORT, &pinConfig);
+  if (err != ESP_OK) {
+    Serial.printf("speaker i2s_set_pin failed: %d\n", err);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(SPEAKER_I2S_PORT);
+  return true;
+}
+
+static void writeSpeakerSilence(uint32_t durationMs) {
+  if (!speakerReady || durationMs == 0) {
+    return;
+  }
+
+  static int16_t silence[128 * 2];
+  memset(silence, 0, sizeof(silence));
+
+  uint32_t framesRemaining = (SPEAKER_SAMPLE_RATE * durationMs) / 1000;
+  while (framesRemaining > 0) {
+    uint32_t frames = framesRemaining > 128 ? 128 : framesRemaining;
+    size_t bytesWritten = 0;
+    i2s_write(
+        SPEAKER_I2S_PORT,
+        silence,
+        frames * 2 * sizeof(int16_t),
+        &bytesWritten,
+        portMAX_DELAY);
+    framesRemaining -= frames;
+  }
+}
+
+static void playTone(uint16_t frequencyHz, uint32_t durationMs) {
+  if (!speakerReady || frequencyHz == 0 || durationMs == 0) {
+    return;
+  }
+
+  static int16_t frames[128 * 2];
+  uint32_t phase = 0;
+  uint32_t phaseStep = (static_cast<uint32_t>(frequencyHz) << 16) / SPEAKER_SAMPLE_RATE;
+  uint32_t framesRemaining = (SPEAKER_SAMPLE_RATE * durationMs) / 1000;
+
+  while (framesRemaining > 0) {
+    uint32_t frameCount = framesRemaining > 128 ? 128 : framesRemaining;
+    for (uint32_t i = 0; i < frameCount; i++) {
+      int16_t sample = (phase & 0x8000) ? SPEAKER_AMPLITUDE : -SPEAKER_AMPLITUDE;
+      frames[i * 2] = sample;
+      frames[i * 2 + 1] = sample;
+      phase += phaseStep;
+    }
+
+    size_t bytesWritten = 0;
+    i2s_write(
+        SPEAKER_I2S_PORT,
+        frames,
+        frameCount * 2 * sizeof(int16_t),
+        &bytesWritten,
+        portMAX_DELAY);
+    framesRemaining -= frameCount;
+  }
+
+  writeSpeakerSilence(25);
+}
+
+static void playReadySound() {
+  playTone(880, 70);
+  writeSpeakerSilence(30);
+  playTone(1320, 70);
+}
+
+static void playStartSound() {
+  playTone(660, 90);
+}
+
+static void playOkSound() {
+  playTone(880, 70);
+  writeSpeakerSilence(25);
+  playTone(1175, 100);
+}
+
+static void playErrorSound() {
+  playTone(220, 180);
+}
+
 static void drawCenteredText(const char *text, int16_t y, uint16_t color, uint8_t size) {
   int16_t x1;
   int16_t y1;
@@ -242,7 +374,7 @@ static void showReadyScreen() {
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
   tft.setCursor(20, 294);
-  tft.print("Serial: 921600  w=wifi");
+  tft.print("BTN13=talk  b=beep");
 }
 
 static void showStatus(const char *status, uint16_t color) {
@@ -380,8 +512,11 @@ static void printHelp() {
   Serial.println("  h - show this help");
   Serial.println("  v - toggle live volume meter");
   Serial.println("  w - test WiFi and update the screen");
+  Serial.println("  b - test speaker beep");
   Serial.println("  r - record 5 seconds and print WAV Base64");
   Serial.println("  s - record 5 seconds and send to STT server");
+  Serial.println("Button:");
+  Serial.println("  GPIO13 -> GND triggers speech-to-text recording");
   Serial.println();
 }
 
@@ -602,12 +737,14 @@ static void recordAndSendToStt(uint32_t seconds) {
   if (isPlaceholderConfig()) {
     Serial.println("Edit include/secrets.h: set WIFI_SSID, WIFI_PASSWORD, and STT_SERVER_URL.");
     showStatus("set config", ST77XX_RED);
+    playErrorSound();
     delay(1200);
     showReadyScreen();
     return;
   }
 
   if (!connectWiFi()) {
+    playErrorSound();
     delay(1200);
     showReadyScreen();
     return;
@@ -616,6 +753,7 @@ static void recordAndSendToStt(uint32_t seconds) {
   HttpEndpoint endpoint;
   if (!parseHttpUrl(STT_SERVER_URL, endpoint)) {
     showStatus("bad url", ST77XX_RED);
+    playErrorSound();
     delay(1200);
     showReadyScreen();
     return;
@@ -626,6 +764,7 @@ static void recordAndSendToStt(uint32_t seconds) {
   if (!client.connect(endpoint.host.c_str(), endpoint.port)) {
     Serial.println("Could not connect to STT server.");
     showStatus("stt offline", ST77XX_RED);
+    playErrorSound();
     delay(1200);
     showReadyScreen();
     return;
@@ -643,12 +782,14 @@ static void recordAndSendToStt(uint32_t seconds) {
                 static_cast<unsigned long>(seconds),
                 STT_SERVER_URL);
   showStatus("speak now", ST77XX_CYAN);
+  playStartSound();
 
   bool writeOk = streamWavToClient(client, seconds);
   if (!writeOk) {
     Serial.println("Upload failed while streaming audio.");
     client.stop();
     showStatus("send failed", ST77XX_RED);
+    playErrorSound();
     delay(1200);
     showReadyScreen();
     return;
@@ -668,8 +809,10 @@ static void recordAndSendToStt(uint32_t seconds) {
     Serial.print("Transcript: ");
     Serial.println(text);
     showStatus("stt ok", ST77XX_GREEN);
+    playOkSound();
   } else {
     showStatus("stt error", ST77XX_RED);
+    playErrorSound();
   }
 
   delay(1500);
@@ -716,6 +859,36 @@ static void recordWavBase64(uint32_t seconds) {
   showReadyScreen();
 }
 
+static void initButton() {
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  buttonStableState = digitalRead(BUTTON_PIN);
+  buttonLastReading = buttonStableState;
+  buttonLastChangeMs = millis();
+}
+
+static void handleButton() {
+  bool reading = digitalRead(BUTTON_PIN);
+  if (reading != buttonLastReading) {
+    buttonLastReading = reading;
+    buttonLastChangeMs = millis();
+  }
+
+  if (millis() - buttonLastChangeMs < BUTTON_DEBOUNCE_MS) {
+    return;
+  }
+
+  if (reading == buttonStableState) {
+    return;
+  }
+
+  buttonStableState = reading;
+  if (buttonStableState == LOW) {
+    Serial.println("Button pressed: start speech-to-text recording");
+    showStatus("button rec", ST77XX_CYAN);
+    recordAndSendToStt(RECORD_SECONDS);
+  }
+}
+
 static void handleSerialCommands() {
   while (Serial.available() > 0) {
     char command = static_cast<char>(Serial.read());
@@ -736,6 +909,11 @@ static void handleSerialCommands() {
     case 'w':
     case 'W':
       runWifiScreenTest();
+      break;
+    case 'b':
+    case 'B':
+      Serial.println("Speaker beep test");
+      playReadySound();
       break;
     case 'r':
     case 'R':
@@ -766,6 +944,13 @@ void setup() {
                 MIC_SD_PIN);
 
   initDisplay();
+  initButton();
+  speakerReady = initSpeakerI2S();
+  Serial.printf("Speaker: %s (BCLK=%d, LRC=%d, DIN=%d)\n",
+                speakerReady ? "ready" : "disabled/error",
+                SPEAKER_BCLK_PIN,
+                SPEAKER_LRC_PIN,
+                SPEAKER_DIN_PIN);
 
   if (!initMicI2S()) {
     Serial.println("Microphone init failed. Check wiring and reboot.");
@@ -782,12 +967,14 @@ void setup() {
   }
 
   Serial.println("Microphone ready.");
+  playReadySound();
   connectWiFi();
   showReadyScreen();
   printHelp();
 }
 
 void loop() {
+  handleButton();
   handleSerialCommands();
 
   if (volumeMeterEnabled) {
