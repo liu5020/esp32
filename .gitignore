@@ -1,0 +1,11 @@
+.pio/
+.vscode/
+
+# Local credentials and machine-specific network settings.
+include/secrets.h
+tools/stt_config.json
+
+# Python cache files from the bridge script.
+__pycache__/
+*.py[cod]
+
