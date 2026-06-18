@@ -13,6 +13,9 @@ a black-and-white preview on the screen, and print the result on thermal paper.
 voice -> speech to text -> sketch generation -> screen preview -> thermal print
 ```
 
+The mini program and configuration protocol plan is recorded in
+[`MINIPROGRAM_CONFIG.md`](MINIPROGRAM_CONFIG.md).
+
 ## Recommended Final Architecture
 
 ```mermaid
