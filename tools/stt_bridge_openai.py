@@ -22,7 +22,9 @@ from pathlib import Path
 import shutil
 import socket
 import sys
+import threading
 import time
+import wave
 from datetime import datetime
 import uuid
 import urllib.error
@@ -49,6 +51,8 @@ PRINT_HEIGHT = 384
 CONFIG: dict[str, object] = {}
 RECORDINGS_DIR = DEFAULT_RECORDINGS_DIR
 SKETCHES_DIR = DEFAULT_SKETCHES_DIR
+LOCAL_SHERPA_RECOGNIZER: object | None = None
+LOCAL_SHERPA_LOCK = threading.Lock()
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 
@@ -66,11 +70,16 @@ def parse_bool(value: object, default: bool = False) -> bool:
 
 def load_config(path: Path) -> dict[str, object]:
     config: dict[str, object] = {
-        "stt_provider": "dashscope_paraformer",
+        "stt_provider": "local_sherpa_onnx",
+        "stt_fallback_provider": "dashscope_paraformer",
         "stt_api_key": "",
         "stt_model": "paraformer-realtime-v2",
         "stt_format": "wav",
         "stt_sample_rate": 16000,
+        "local_stt_model_dir": "tools/models/sherpa-onnx-paraformer-zh-small-2024-03-09",
+        "local_stt_model_file": "model.int8.onnx",
+        "local_stt_tokens_file": "tokens.txt",
+        "local_stt_num_threads": 4,
         "api_key": "",
         "transcriptions_url": DEFAULT_TRANSCRIPTIONS_URL,
         "model": "gpt-4o-mini-transcribe",
@@ -105,6 +114,7 @@ def load_config(path: Path) -> dict[str, object]:
 
     # Environment variables still work and override the file when present.
     config["stt_provider"] = os.environ.get("STT_PROVIDER", str(config["stt_provider"]))
+    config["stt_fallback_provider"] = os.environ.get("STT_FALLBACK_PROVIDER", str(config["stt_fallback_provider"]))
     config["stt_api_key"] = (
         os.environ.get("STT_API_KEY")
         or os.environ.get("DASHSCOPE_API_KEY")
@@ -119,6 +129,10 @@ def load_config(path: Path) -> dict[str, object]:
     )
     config["stt_format"] = os.environ.get("STT_FORMAT", str(config["stt_format"]))
     config["stt_sample_rate"] = os.environ.get("STT_SAMPLE_RATE", config["stt_sample_rate"])
+    config["local_stt_model_dir"] = os.environ.get("LOCAL_STT_MODEL_DIR", str(config["local_stt_model_dir"]))
+    config["local_stt_model_file"] = os.environ.get("LOCAL_STT_MODEL_FILE", str(config["local_stt_model_file"]))
+    config["local_stt_tokens_file"] = os.environ.get("LOCAL_STT_TOKENS_FILE", str(config["local_stt_tokens_file"]))
+    config["local_stt_num_threads"] = os.environ.get("LOCAL_STT_NUM_THREADS", config["local_stt_num_threads"])
     config["api_key"] = os.environ.get("STT_API_KEY") or os.environ.get("OPENAI_API_KEY") or config["api_key"]
     config["transcriptions_url"] = os.environ.get("STT_TRANSCRIPTIONS_URL", config["transcriptions_url"])
     config["model"] = os.environ.get("STT_MODEL") or os.environ.get("OPENAI_TRANSCRIBE_MODEL", config["model"])
@@ -174,14 +188,28 @@ def get_config_int(key: str, default: int) -> int:
 
 
 def get_stt_provider() -> str:
-    return get_config_str("stt_provider", "dashscope_paraformer").strip().lower()
+    return get_config_str("stt_provider", "local_sherpa_onnx").strip().lower()
+
+
+def get_stt_fallback_provider() -> str:
+    return get_config_str("stt_fallback_provider", "dashscope_paraformer").strip().lower()
+
+
+def is_dashscope_stt_provider(provider: str) -> bool:
+    return provider in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer")
+
+
+def is_local_sherpa_provider(provider: str) -> bool:
+    return provider in ("local", "local_sherpa", "local_sherpa_onnx", "sherpa", "sherpa_onnx")
 
 
 def get_stt_api_key() -> str:
     key = get_config_str("stt_api_key")
     if key:
         return key
-    if get_stt_provider() in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer"):
+    provider = get_stt_provider()
+    fallback_provider = get_stt_fallback_provider()
+    if is_dashscope_stt_provider(provider) or is_dashscope_stt_provider(fallback_provider):
         return get_config_str("image_api_key")
     return get_config_str("api_key")
 
@@ -198,6 +226,7 @@ def print_config_warnings() -> None:
     api_key = get_stt_api_key()
     endpoint = get_config_str("transcriptions_url")
     stt_provider = get_stt_provider()
+    stt_fallback_provider = get_stt_fallback_provider()
     image_provider = get_config_str("image_provider", "local").lower()
     image_api_key = get_config_str("image_api_key")
 
@@ -207,9 +236,14 @@ def print_config_warnings() -> None:
     if "..." in api_key:
         print("WARNING: STT api key contains '...'. The dashboard masked key cannot be used.", flush=True)
 
-    if stt_provider in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer"):
+    if is_dashscope_stt_provider(stt_provider) or is_dashscope_stt_provider(stt_fallback_provider):
         if not api_key or api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
             print("WARNING: DashScope STT key is not set. Set stt_api_key or image_api_key.", flush=True)
+
+    if is_local_sherpa_provider(stt_provider):
+        model_dir = Path(get_config_str("local_stt_model_dir"))
+        if not model_dir.exists():
+            print(f"WARNING: local STT model dir does not exist: {model_dir}", flush=True)
 
     if image_provider in ("aliyun", "aliyun_wanx", "dashscope", "wanx"):
         if not image_api_key or image_api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
@@ -1035,11 +1069,97 @@ def transcribe_with_dashscope(wav_path: Path) -> str:
     return extract_dashscope_text(result)
 
 
-def transcribe_audio(wav_bytes: bytes, wav_path: Path) -> str:
-    provider = get_stt_provider()
-    if provider in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer"):
+def get_local_sherpa_recognizer() -> object:
+    global LOCAL_SHERPA_RECOGNIZER
+
+    with LOCAL_SHERPA_LOCK:
+        if LOCAL_SHERPA_RECOGNIZER is not None:
+            return LOCAL_SHERPA_RECOGNIZER
+
+        try:
+            import sherpa_onnx
+        except ImportError as exc:
+            raise RuntimeError("sherpa-onnx is required for local STT. Install with: python -m pip install sherpa-onnx") from exc
+
+        model_dir = Path(get_config_str("local_stt_model_dir"))
+        model_path = model_dir / get_config_str("local_stt_model_file", "model.int8.onnx")
+        tokens_path = model_dir / get_config_str("local_stt_tokens_file", "tokens.txt")
+        if not model_path.exists() or not tokens_path.exists():
+            raise RuntimeError(f"local STT model files not found: {model_path}, {tokens_path}")
+
+        print(f"loading local sherpa-onnx STT model: {model_path}", flush=True)
+        start = time.monotonic()
+        LOCAL_SHERPA_RECOGNIZER = sherpa_onnx.OfflineRecognizer.from_paraformer(
+            paraformer=str(model_path),
+            tokens=str(tokens_path),
+            num_threads=get_config_int("local_stt_num_threads", 4),
+            sample_rate=get_config_int("stt_sample_rate", 16000),
+            feature_dim=80,
+            decoding_method="greedy_search",
+            debug=False,
+        )
+        print(f"local STT model loaded in {time.monotonic() - start:.2f}s", flush=True)
+        return LOCAL_SHERPA_RECOGNIZER
+
+
+def read_wav_as_float32_mono(wav_path: Path) -> tuple[int, object]:
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("numpy is required for local STT. Install with: python -m pip install numpy") from exc
+
+    with wave.open(str(wav_path), "rb") as wav:
+        channels = wav.getnchannels()
+        sample_rate = wav.getframerate()
+        sample_width = wav.getsampwidth()
+        frames = wav.readframes(wav.getnframes())
+
+    if sample_width != 2:
+        raise RuntimeError(f"local STT expects 16-bit PCM WAV, got sample width {sample_width}")
+
+    audio = np.frombuffer(frames, dtype="<i2")
+    if channels > 1:
+        audio = audio.reshape(-1, channels)[:, 0]
+    return sample_rate, audio.astype("float32") / 32768.0
+
+
+def transcribe_with_sherpa_onnx(wav_path: Path) -> str:
+    recognizer = get_local_sherpa_recognizer()
+    sample_rate, audio = read_wav_as_float32_mono(wav_path)
+    stream = recognizer.create_stream()
+    start = time.monotonic()
+    stream.accept_waveform(sample_rate, audio)
+    recognizer.decode_stream(stream)
+    text = str(stream.result.text).replace(" ", "").strip()
+    print(f"local STT decoded in {time.monotonic() - start:.2f}s: {text}", flush=True)
+    if not text:
+        raise RuntimeError("local STT returned empty text")
+    return text
+
+
+def transcribe_with_provider(provider: str, wav_bytes: bytes, wav_path: Path) -> str:
+    if is_local_sherpa_provider(provider):
+        return transcribe_with_sherpa_onnx(wav_path)
+    if is_dashscope_stt_provider(provider):
         return transcribe_with_dashscope(wav_path)
     return transcribe_with_openai(wav_bytes)
+
+
+def transcribe_audio(wav_bytes: bytes, wav_path: Path) -> tuple[str, dict[str, object]]:
+    provider = get_stt_provider()
+    try:
+        return transcribe_with_provider(provider, wav_bytes, wav_path), {"stt_provider": provider}
+    except Exception as exc:
+        fallback_provider = get_stt_fallback_provider()
+        if fallback_provider and fallback_provider != provider:
+            print(f"STT provider {provider} failed, falling back to {fallback_provider}: {exc}", file=sys.stderr, flush=True)
+            text = transcribe_with_provider(fallback_provider, wav_bytes, wav_path)
+            return text, {
+                "stt_provider": fallback_provider,
+                "stt_fallback_from": provider,
+                "stt_error": str(exc)[:500],
+            }
+        raise
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1051,7 +1171,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {
                 "ok": True,
                 "stt_provider": get_stt_provider(),
+                "stt_fallback_provider": get_stt_fallback_provider(),
                 "stt_model": get_config_str("stt_model"),
+                "local_stt_model_dir": get_config_str("local_stt_model_dir"),
                 "image_provider": get_config_str("image_provider", "local"),
                 "image_model": get_config_str("image_model"),
             })
@@ -1115,7 +1237,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"saved wav: {saved_path}", flush=True)
 
         try:
-            text = transcribe_audio(wav_bytes, saved_path)
+            text, stt_meta = transcribe_audio(wav_bytes, saved_path)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             print(f"STT HTTP error {exc.code}: {detail}", file=sys.stderr, flush=True)
@@ -1133,6 +1255,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"saved print sketch: {print_path}", flush=True)
         self.send_json(200, {
             "text": text,
+            **stt_meta,
             **image_meta,
             "image": preview_sketch,
             "print_image": {
@@ -1177,11 +1300,13 @@ def main() -> int:
     print(f"config={config_path}", flush=True)
     print(
         f"stt_provider={get_stt_provider()} "
+        f"stt_fallback_provider={get_stt_fallback_provider()} "
         f"stt_model={get_config_str('stt_model')} "
         f"stt_format={get_config_str('stt_format')} "
         f"stt_sample_rate={get_config_int('stt_sample_rate', 16000)}",
         flush=True,
     )
+    print(f"local_stt_model_dir={get_config_str('local_stt_model_dir')}", flush=True)
     print(f"stt_api_key={mask_secret(get_stt_api_key())}", flush=True)
     print(f"openai_compatible_endpoint={get_config_str('transcriptions_url')}", flush=True)
     print(f"openai_compatible_model={get_config_str('model')} language={get_config_str('language') or '(auto)'}", flush=True)

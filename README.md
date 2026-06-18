@@ -149,11 +149,16 @@ key on the ESP32.
 
    ```json
    {
-     "stt_provider": "dashscope_paraformer",
+     "stt_provider": "local_sherpa_onnx",
+     "stt_fallback_provider": "dashscope_paraformer",
      "stt_api_key": "",
      "stt_model": "paraformer-realtime-v2",
      "stt_format": "wav",
      "stt_sample_rate": 16000,
+     "local_stt_model_dir": "tools/models/sherpa-onnx-paraformer-zh-small-2024-03-09",
+     "local_stt_model_file": "model.int8.onnx",
+     "local_stt_tokens_file": "tokens.txt",
+     "local_stt_num_threads": 4,
      "api_key": "optional_openai_or_groq_key",
      "transcriptions_url": "https://api.groq.com/openai/v1/audio/transcriptions",
      "model": "whisper-large-v3-turbo",
@@ -175,10 +180,26 @@ key on the ESP32.
    }
    ```
 
-   This default uses Alibaba Cloud DashScope Paraformer for speech-to-text and
-   Alibaba Cloud Model Studio / DashScope for image generation. If `stt_api_key`
-   is empty, the bridge reuses `image_api_key`, so one DashScope API key is
-   enough for both STT and image generation.
+   This default uses local sherpa-onnx speech-to-text first, then falls back to
+   Alibaba Cloud DashScope Paraformer if local recognition fails. Image
+   generation still uses Alibaba Cloud Model Studio / DashScope. If
+   `stt_api_key` is empty, the fallback STT path reuses `image_api_key`, so one
+   DashScope API key is enough for cloud fallback and image generation.
+
+   The local STT model is not committed to Git. On the Orange Pi, download it
+   under `tools/models/`:
+
+   ```bash
+   cd ~/voice_ai_mic_server
+   mkdir -p tools/models
+   cd tools/models
+   wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2
+   tar xjf sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2
+   ```
+
+   The small int8 local model is fast and cheap, but it can misrecognize some
+   similar words. Use `stt_provider: "dashscope_paraformer"` when cloud accuracy
+   is more important than local/offline behavior.
 
    Groq or OpenAI-compatible speech-to-text is still available as a fallback.
    Set `stt_provider` to `openai_compatible`, then configure:

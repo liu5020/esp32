@@ -34,6 +34,14 @@ if ($config.image_model -eq $example.image_model -and $config.image_generation_u
   $config.image_generation_url = $example.image_generation_url
 }
 
+if ($config.stt_provider -eq "dashscope_paraformer") {
+  $config.stt_provider = $example.stt_provider
+}
+
+if ($null -eq $config.PSObject.Properties["stt_fallback_provider"]) {
+  $config | Add-Member -NotePropertyName "stt_fallback_provider" -NotePropertyValue $example.stt_fallback_provider
+}
+
 $config |
   ConvertTo-Json -Depth 10 |
   Set-Content -LiteralPath $configPath -Encoding utf8

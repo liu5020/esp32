@@ -70,11 +70,16 @@ these fields to the ignored `tools/stt_config.json` on the Orange Pi:
 
 ```json
 {
-  "stt_provider": "dashscope_paraformer",
+  "stt_provider": "local_sherpa_onnx",
+  "stt_fallback_provider": "dashscope_paraformer",
   "stt_api_key": "",
   "stt_model": "paraformer-realtime-v2",
   "stt_format": "wav",
   "stt_sample_rate": 16000,
+  "local_stt_model_dir": "tools/models/sherpa-onnx-paraformer-zh-small-2024-03-09",
+  "local_stt_model_file": "model.int8.onnx",
+  "local_stt_tokens_file": "tokens.txt",
+  "local_stt_num_threads": 4,
   "image_provider": "aliyun_wanx",
   "image_api_key": "your_dashscope_api_key",
   "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
@@ -92,10 +97,25 @@ these fields to the ignored `tools/stt_config.json` on the Orange Pi:
 }
 ```
 
-If `stt_api_key` is empty, the bridge reuses `image_api_key`, so one DashScope
-API key is enough for both speech recognition and image generation. If the image
-API fails, `image_fallback_local: true` keeps the old local sketch generator
-working.
+The bridge uses local sherpa-onnx speech-to-text first, then falls back to
+Alibaba Cloud DashScope Paraformer if local recognition fails. If `stt_api_key`
+is empty, the fallback STT path reuses `image_api_key`, so one DashScope API key
+is enough for both cloud fallback and image generation. If the image API fails,
+`image_fallback_local: true` keeps the old local sketch generator working.
+
+Download the local STT model on the Orange Pi:
+
+```bash
+cd ~/voice_ai_mic_server
+mkdir -p tools/models
+cd tools/models
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2
+tar xjf sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2
+```
+
+This model is about 80 MB after extraction. It is fast enough for local testing,
+but can misrecognize similar words; set `stt_provider` to
+`dashscope_paraformer` if cloud accuracy is preferred.
 
 The default image model is `wan2.2-t2i-flash` for lower-cost testing.
 `image_call_mode: auto` uses synchronous calls for `wan2.6-t2i` and asynchronous
