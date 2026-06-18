@@ -18,6 +18,10 @@
       <view class="field-label">后端 URL</view>
       <input class="input mono" value="{{baseUrl}}" bindinput="onInput" data-key="baseUrl" placeholder="http://192.168.31.58:8787" />
     </view>
+    <view class="field">
+      <view class="field-label">后端访问 Token</view>
+      <input class="input mono" value="{{accessToken}}" bindinput="onInput" data-key="accessToken" password placeholder="公网使用时填写" />
+    </view>
     <view class="actions">
       <button class="btn secondary" bindtap="saveLocal">保存本机</button>
       <button class="btn primary" bindtap="sendToDevice">发送设备</button>

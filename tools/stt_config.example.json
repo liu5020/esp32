@@ -26,5 +26,6 @@
   "image_task_poll_seconds": 2,
   "image_task_timeout_seconds": 180,
   "image_threshold": 210,
-  "image_fallback_local": true
+  "image_fallback_local": true,
+  "public_access_token": ""
 }

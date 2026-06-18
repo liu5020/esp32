@@ -37,6 +37,7 @@ const DEFAULT_CONFIG = {
   },
   backend: {
     baseUrl: 'http://192.168.31.58:8787',
+    accessToken: '',
     aiMode: 'local_first',
     sttProvider: 'local_sherpa_onnx',
     sttFallbackProvider: 'dashscope_paraformer',

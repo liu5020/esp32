@@ -157,15 +157,22 @@ The config write characteristic accepts one newline-terminated JSON message:
       "password": "..."
     },
     "backend": {
-      "base_url": "http://192.168.31.58:8787"
+      "base_url": "https://api.jpxh.top",
+      "access_token": "optional-public-backend-token"
     }
   }
 }
 ```
 
-The parser looks for `ssid`, `password`, and `base_url` anywhere in the message.
-The backend value should be the base URL, not `/stt`; if `/stt` is included by
-mistake, the firmware strips it and appends `/stt` when uploading audio.
+The parser looks for `ssid`, `password`, `base_url`, and optional
+`access_token` anywhere in the message. The backend value should be the base
+URL, not `/stt`; if `/stt` is included by mistake, the firmware strips it and
+appends `/stt` when uploading audio.
+
+Both `http://` and `https://` backend URLs are supported. The current HTTPS
+client uses the development-friendly `BACKEND_TLS_INSECURE` setting from
+`include/secrets.h`; this encrypts traffic but does not pin a certificate yet.
+Pin a root certificate later before treating the device as production-secure.
 
 Use serial command `p` to check the active config source, and `c` to clear the
 saved BLE config and fall back to `include/secrets.h`.
@@ -224,7 +231,8 @@ key on the ESP32.
      "image_task_poll_seconds": 2,
      "image_task_timeout_seconds": 180,
      "image_threshold": 210,
-     "image_fallback_local": true
+     "image_fallback_local": true,
+     "public_access_token": ""
    }
    ```
 

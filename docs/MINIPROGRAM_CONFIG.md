@@ -68,12 +68,15 @@ Minimal device config payload:
     "password": "..."
   },
   "backend": {
-    "base_url": "http://192.168.31.58:8787"
+    "base_url": "https://api.jpxh.top",
+    "access_token": "optional-public-backend-token"
   }
 }
 ```
 
-ESP32 should store only this data. It should not receive provider API keys.
+ESP32 should store only this data. The backend access token is only a gate for
+your own public endpoint; it is not an AI provider API key. ESP32 should not
+receive provider API keys.
 
 ## Backend Config
 
@@ -109,6 +112,10 @@ Recommended future backend endpoints:
 | `/draw?text=...` | GET | Existing demo image generation. |
 | `/stt` | POST | Existing WAV upload and sketch generation. |
 | `/latest` | GET | Return latest text, provider, source image path, and preview metadata. |
+
+For public deployments, keep `/health` public and require
+`X-VoiceSketch-Token` or `Authorization: Bearer ...` for `/stt`, `/draw`, and
+`/print`.
 
 ## AI Mode Options
 

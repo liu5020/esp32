@@ -12,3 +12,11 @@
 // BLE provisioning stores the backend base URL, for example
 // http://192.168.31.58:8787, and the firmware appends /stt automatically.
 #define STT_SERVER_URL "http://192.168.1.100:8787/stt"
+
+// Optional public backend protection token. This is not an AI provider key; it
+// is only used to protect your own /stt, /draw, and /print endpoints.
+#define BACKEND_ACCESS_TOKEN ""
+
+// Development default: accept any valid TLS endpoint without pinning a CA root.
+// Set to 0 later if you add and configure a pinned root certificate.
+#define BACKEND_TLS_INSECURE 1

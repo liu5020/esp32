@@ -6,6 +6,7 @@ Page({
     wifiSsid: '',
     wifiPassword: '',
     baseUrl: '',
+    accessToken: '',
   },
 
   onLoad() {
@@ -14,6 +15,7 @@ Page({
       wifiSsid: config.device.wifiSsid,
       wifiPassword: config.device.wifiPassword,
       baseUrl: config.backend.baseUrl,
+      accessToken: config.backend.accessToken,
     });
   },
 
@@ -31,6 +33,7 @@ Page({
       },
       backend: {
         baseUrl: this.data.baseUrl,
+        accessToken: this.data.accessToken,
       },
     });
     wx.showToast({ title: '已保存', icon: 'success' });
@@ -47,6 +50,7 @@ Page({
         },
         backend: {
           base_url: this.data.baseUrl,
+          access_token: this.data.accessToken,
         },
       });
       wx.showToast({ title: '已发送', icon: 'success' });

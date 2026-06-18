@@ -8,10 +8,19 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <driver/i2s.h>
 #include <string.h>
 
 #include "secrets.h"
+
+#ifndef BACKEND_ACCESS_TOKEN
+#define BACKEND_ACCESS_TOKEN ""
+#endif
+
+#ifndef BACKEND_TLS_INSECURE
+#define BACKEND_TLS_INSECURE 1
+#endif
 
 // ST7789 TFT wiring, same as the screen setup that was already working.
 static constexpr int TFT_SCLK_PIN = 18;
@@ -82,6 +91,7 @@ static uint8_t sketchBitmap[SKETCH_BITMAP_BYTES];
 static String configuredWifiSsid;
 static String configuredWifiPassword;
 static String configuredBackendBaseUrl;
+static String configuredBackendAccessToken;
 static bool hasStoredDeviceConfig = false;
 static bool bleClientConnected = false;
 static String bleRxBuffer;
@@ -89,6 +99,7 @@ static bool pendingBleConfig = false;
 static String pendingBleWifiSsid;
 static String pendingBleWifiPassword;
 static String pendingBleBackendBaseUrl;
+static String pendingBleBackendAccessToken;
 static BLECharacteristic *bleStatusCharacteristic = nullptr;
 
 static Adafruit_ST7789 tft =
@@ -98,6 +109,7 @@ struct HttpEndpoint {
   String host;
   uint16_t port = 80;
   String path = "/";
+  bool secure = false;
 };
 
 static String trimTrailingSlashes(String value) {
@@ -143,6 +155,10 @@ static String activeBackendBaseUrl() {
   return configuredBackendBaseUrl.length() > 0 ? configuredBackendBaseUrl : fallbackBackendBaseUrl();
 }
 
+static String activeBackendAccessToken() {
+  return configuredBackendAccessToken.length() > 0 ? configuredBackendAccessToken : String(BACKEND_ACCESS_TOKEN);
+}
+
 static String activeSttServerUrl() {
   return activeBackendBaseUrl() + "/stt";
 }
@@ -157,6 +173,7 @@ static bool loadDeviceConfig() {
   configuredWifiSsid = prefs.getString("ssid", "");
   configuredWifiPassword = prefs.getString("pass", "");
   configuredBackendBaseUrl = normalizeBackendBaseUrl(prefs.getString("backend", ""));
+  configuredBackendAccessToken = prefs.getString("token", "");
   prefs.end();
 
   hasStoredDeviceConfig = configuredWifiSsid.length() > 0 && configuredBackendBaseUrl.length() > 0;
@@ -170,7 +187,7 @@ static bool loadDeviceConfig() {
   return hasStoredDeviceConfig;
 }
 
-static bool saveDeviceConfig(const String &ssid, const String &password, const String &backendBaseUrl) {
+static bool saveDeviceConfig(const String &ssid, const String &password, const String &backendBaseUrl, const String &accessToken) {
   Preferences prefs;
   if (!prefs.begin(CONFIG_NAMESPACE, false)) {
     Serial.println("NVS config write failed: open error.");
@@ -181,6 +198,7 @@ static bool saveDeviceConfig(const String &ssid, const String &password, const S
   size_t ssidWritten = prefs.putString("ssid", ssid);
   prefs.putString("pass", password);
   size_t backendWritten = prefs.putString("backend", cleanBackend);
+  prefs.putString("token", accessToken);
   bool ok = ssidWritten > 0 && backendWritten > 0;
   prefs.end();
 
@@ -188,6 +206,7 @@ static bool saveDeviceConfig(const String &ssid, const String &password, const S
     configuredWifiSsid = ssid;
     configuredWifiPassword = password;
     configuredBackendBaseUrl = cleanBackend;
+    configuredBackendAccessToken = accessToken;
     hasStoredDeviceConfig = true;
   }
   return ok;
@@ -205,6 +224,7 @@ static bool clearDeviceConfig() {
     configuredWifiSsid = "";
     configuredWifiPassword = "";
     configuredBackendBaseUrl = "";
+    configuredBackendAccessToken = "";
     hasStoredDeviceConfig = false;
   }
   return ok;
@@ -216,6 +236,7 @@ static void printDeviceConfig() {
   Serial.printf("  ssid: %s\n", activeWifiSsid().c_str());
   Serial.printf("  backend: %s\n", activeBackendBaseUrl().c_str());
   Serial.printf("  stt: %s\n", activeSttServerUrl().c_str());
+  Serial.printf("  access token: %s\n", activeBackendAccessToken().length() > 0 ? "set" : "not set");
   Serial.println("  password: <hidden>");
 }
 
@@ -705,13 +726,19 @@ static bool isPlaceholderConfig() {
 
 static bool parseHttpUrl(const String &url, HttpEndpoint &endpoint) {
   String value(url);
-  const String prefix = "http://";
-  if (!value.startsWith(prefix)) {
-    Serial.println("Only http:// backend URLs are supported by this firmware starter.");
+  const String httpPrefix = "http://";
+  const String httpsPrefix = "https://";
+  if (value.startsWith(httpPrefix)) {
+    endpoint.secure = false;
+    value.remove(0, httpPrefix.length());
+  } else if (value.startsWith(httpsPrefix)) {
+    endpoint.secure = true;
+    value.remove(0, httpsPrefix.length());
+  } else {
+    Serial.println("Only http:// or https:// backend URLs are supported.");
     return false;
   }
 
-  value.remove(0, prefix.length());
   int slashIndex = value.indexOf('/');
   String hostPort = slashIndex >= 0 ? value.substring(0, slashIndex) : value;
   endpoint.path = slashIndex >= 0 ? value.substring(slashIndex) : "/";
@@ -722,10 +749,33 @@ static bool parseHttpUrl(const String &url, HttpEndpoint &endpoint) {
     endpoint.port = static_cast<uint16_t>(hostPort.substring(colonIndex + 1).toInt());
   } else {
     endpoint.host = hostPort;
-    endpoint.port = 80;
+    endpoint.port = endpoint.secure ? 443 : 80;
   }
 
   return endpoint.host.length() > 0 && endpoint.port > 0;
+}
+
+static bool connectBackendClient(const HttpEndpoint &endpoint,
+                                 WiFiClient &plainClient,
+                                 WiFiClientSecure &secureClient,
+                                 WiFiClient *&client) {
+  if (endpoint.secure) {
+#if BACKEND_TLS_INSECURE
+    secureClient.setInsecure();
+#endif
+    client = &secureClient;
+  } else {
+    client = &plainClient;
+  }
+
+  return client->connect(endpoint.host.c_str(), endpoint.port);
+}
+
+static void writeAccessTokenHeader(WiFiClient &client) {
+  String token = activeBackendAccessToken();
+  if (token.length() > 0) {
+    client.printf("X-VoiceSketch-Token: %s\r\n", token.c_str());
+  }
 }
 
 static bool connectWiFi() {
@@ -871,8 +921,10 @@ static void fetchDemoSketch() {
   endpoint.path = "/draw?text=cat";
   showStatus("draw demo", ST77XX_YELLOW);
 
-  WiFiClient client;
-  if (!client.connect(endpoint.host.c_str(), endpoint.port)) {
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
+  WiFiClient *client = nullptr;
+  if (!connectBackendClient(endpoint, plainClient, secureClient, client)) {
     Serial.println("Could not connect to sketch server.");
     showStatus("draw offline", ST77XX_RED);
     playErrorSound();
@@ -881,14 +933,15 @@ static void fetchDemoSketch() {
     return;
   }
 
-  client.printf("GET %s HTTP/1.1\r\n", endpoint.path.c_str());
-  client.printf("Host: %s:%u\r\n", endpoint.host.c_str(), endpoint.port);
-  client.print("Accept: application/json\r\n");
-  client.print("Connection: close\r\n");
-  client.print("\r\n");
+  client->printf("GET %s HTTP/1.1\r\n", endpoint.path.c_str());
+  client->printf("Host: %s:%u\r\n", endpoint.host.c_str(), endpoint.port);
+  writeAccessTokenHeader(*client);
+  client->print("Accept: application/json\r\n");
+  client->print("Connection: close\r\n");
+  client->print("\r\n");
 
-  String response = readHttpResponse(client, STT_RESPONSE_TIMEOUT_MS);
-  client.stop();
+  String response = readHttpResponse(*client, STT_RESPONSE_TIMEOUT_MS);
+  client->stop();
 
   String body = httpBodyFromResponse(response);
   body.trim();
@@ -1097,6 +1150,13 @@ static void queueBleConfigMessage(const String &message) {
   if (backendBaseUrl.length() == 0) {
     backendBaseUrl = extractJsonStringField(message, "backend_url");
   }
+  String accessToken = extractJsonStringField(message, "access_token");
+  if (accessToken.length() == 0) {
+    accessToken = extractJsonStringField(message, "token");
+  }
+  if (accessToken.length() == 0) {
+    accessToken = activeBackendAccessToken();
+  }
 
   backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrl);
   if (ssid.length() == 0 || backendBaseUrl.length() == 0) {
@@ -1105,15 +1165,16 @@ static void queueBleConfigMessage(const String &message) {
     return;
   }
 
-  if (!backendBaseUrl.startsWith("http://")) {
-    Serial.println("BLE config rejected: only http:// backend URLs are supported.");
-    sendBleStatus("config_error", "backend must start with http://");
+  if (!backendBaseUrl.startsWith("http://") && !backendBaseUrl.startsWith("https://")) {
+    Serial.println("BLE config rejected: backend must start with http:// or https://.");
+    sendBleStatus("config_error", "bad backend url");
     return;
   }
 
   pendingBleWifiSsid = ssid;
   pendingBleWifiPassword = password;
   pendingBleBackendBaseUrl = backendBaseUrl;
+  pendingBleBackendAccessToken = accessToken;
   pendingBleConfig = true;
 
   Serial.printf("BLE config received: ssid=%s backend=%s\n",
@@ -1207,10 +1268,11 @@ static void handlePendingBleConfig() {
   String ssid = pendingBleWifiSsid;
   String password = pendingBleWifiPassword;
   String backendBaseUrl = pendingBleBackendBaseUrl;
+  String accessToken = pendingBleBackendAccessToken;
   pendingBleConfig = false;
 
   showStatus("ble config", ST77XX_CYAN);
-  bool saved = saveDeviceConfig(ssid, password, backendBaseUrl);
+  bool saved = saveDeviceConfig(ssid, password, backendBaseUrl, accessToken);
   if (!saved) {
     Serial.println("BLE config save failed.");
     sendBleStatus("config_error", "save failed");
@@ -1291,8 +1353,10 @@ static void recordAndSendToStt(uint32_t seconds) {
   }
 
   showStatus("connect stt", ST77XX_YELLOW);
-  WiFiClient client;
-  if (!client.connect(endpoint.host.c_str(), endpoint.port)) {
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
+  WiFiClient *client = nullptr;
+  if (!connectBackendClient(endpoint, plainClient, secureClient, client)) {
     Serial.println("Could not connect to STT server.");
     showStatus("stt offline", ST77XX_RED);
     playErrorSound();
@@ -1302,12 +1366,13 @@ static void recordAndSendToStt(uint32_t seconds) {
   }
 
   uint32_t contentLength = 44 + (SAMPLE_RATE * seconds * sizeof(int16_t));
-  client.printf("POST %s HTTP/1.1\r\n", endpoint.path.c_str());
-  client.printf("Host: %s:%u\r\n", endpoint.host.c_str(), endpoint.port);
-  client.print("Content-Type: audio/wav\r\n");
-  client.printf("Content-Length: %lu\r\n", static_cast<unsigned long>(contentLength));
-  client.print("Connection: close\r\n");
-  client.print("\r\n");
+  client->printf("POST %s HTTP/1.1\r\n", endpoint.path.c_str());
+  client->printf("Host: %s:%u\r\n", endpoint.host.c_str(), endpoint.port);
+  writeAccessTokenHeader(*client);
+  client->print("Content-Type: audio/wav\r\n");
+  client->printf("Content-Length: %lu\r\n", static_cast<unsigned long>(contentLength));
+  client->print("Connection: close\r\n");
+  client->print("\r\n");
 
   Serial.printf("Recording and uploading %lu seconds to %s\n",
                 static_cast<unsigned long>(seconds),
@@ -1315,10 +1380,10 @@ static void recordAndSendToStt(uint32_t seconds) {
   showStatus("speak now", ST77XX_CYAN);
   playStartSound();
 
-  bool writeOk = streamWavToClient(client, seconds);
+  bool writeOk = streamWavToClient(*client, seconds);
   if (!writeOk) {
     Serial.println("Upload failed while streaming audio.");
-    client.stop();
+    client->stop();
     showStatus("send failed", ST77XX_RED);
     playErrorSound();
     delay(1200);
@@ -1327,8 +1392,8 @@ static void recordAndSendToStt(uint32_t seconds) {
   }
 
   showStatus("thinking", ST77XX_YELLOW);
-  String response = readHttpResponse(client, STT_RESPONSE_TIMEOUT_MS);
-  client.stop();
+  String response = readHttpResponse(*client, STT_RESPONSE_TIMEOUT_MS);
+  client->stop();
 
   String body = httpBodyFromResponse(response);
   body.trim();

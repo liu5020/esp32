@@ -100,6 +100,7 @@ def load_config(path: Path) -> dict[str, object]:
         "image_threshold": 210,
         "image_autocontrast_cutoff": 2,
         "image_fallback_local": True,
+        "public_access_token": "",
     }
 
     if path.exists():
@@ -166,6 +167,11 @@ def load_config(path: Path) -> dict[str, object]:
         config["image_task_timeout_seconds"] = os.environ["IMAGE_TASK_TIMEOUT_SECONDS"]
     if "IMAGE_FALLBACK_LOCAL" in os.environ:
         config["image_fallback_local"] = parse_bool(os.environ.get("IMAGE_FALLBACK_LOCAL"), True)
+    config["public_access_token"] = (
+        os.environ.get("VOICE_SKETCH_TOKEN")
+        or os.environ.get("PUBLIC_ACCESS_TOKEN")
+        or config["public_access_token"]
+    )
     return config
 
 
@@ -250,6 +256,9 @@ def print_config_warnings() -> None:
             print("WARNING: image_api_key is not set. Image generation will fall back to local sketches.", flush=True)
         elif "..." in image_api_key:
             print("WARNING: image_api_key contains '...'. The dashboard masked key cannot be used.", flush=True)
+
+    if not get_config_str("public_access_token"):
+        print("WARNING: public_access_token is not set. /stt, /draw, and /print are open.", flush=True)
 
 
 def save_recording(wav_bytes: bytes, client_ip: str) -> Path:
@@ -1165,6 +1174,23 @@ def transcribe_audio(wav_bytes: bytes, wav_path: Path) -> tuple[str, dict[str, o
 class Handler(BaseHTTPRequestHandler):
     server_version = "ESP32STTBridge/1.0"
 
+    def check_access_token(self) -> bool:
+        expected = get_config_str("public_access_token")
+        if not expected:
+            return True
+
+        auth_header = self.headers.get("Authorization", "")
+        bearer_prefix = "Bearer "
+        if auth_header.startswith(bearer_prefix) and auth_header[len(bearer_prefix):].strip() == expected:
+            return True
+
+        token_header = self.headers.get("X-VoiceSketch-Token", "")
+        if token_header.strip() == expected:
+            return True
+
+        self.send_json(401, {"error": "unauthorized"})
+        return False
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/health":
@@ -1180,6 +1206,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/draw":
+            if not self.check_access_token():
+                return
             query = urllib.parse.parse_qs(parsed.query)
             text = query.get("text", ["house"])[0]
             preview_sketch, print_sketch, image_meta = generate_sketch_pair(text)
@@ -1201,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/print":
+            if not self.check_access_token():
+                return
             query = urllib.parse.parse_qs(parsed.query)
             text = query.get("text", ["house"])[0]
             preview_sketch, print_sketch, image_meta = generate_sketch_pair(text)
@@ -1214,6 +1244,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path != "/stt":
             self.send_json(404, {"error": "not found"})
+            return
+
+        if not self.check_access_token():
             return
 
         content_length = self.headers.get("Content-Length")

@@ -13,7 +13,8 @@ the early hardware phase.
 ## Pages
 
 - Device: scan and connect to the ESP32 over BLE.
-- Network: save WiFi and backend URL, then send them to the device.
+- Network: save WiFi, backend URL, and optional public access token, then send
+  them to the device.
 - AI Mode: choose the backend mode and provider shape.
 - Advanced: keep custom endpoints and local tuning values.
 - Test: call backend health and draw endpoints from the phone.

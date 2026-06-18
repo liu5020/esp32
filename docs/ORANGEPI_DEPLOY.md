@@ -12,6 +12,7 @@ not depend on the Windows development computer.
 | App directory | `~/voice_ai_mic_server` |
 | Port | `8787` |
 | Health URL | `http://192.168.31.58:8787/health` |
+| Public Health URL | `https://api.jpxh.top/health` |
 | Sketch demo URL | `http://192.168.31.58:8787/draw?text=cat` |
 | Print preview URL | `http://192.168.31.58:8787/print?text=cat` |
 | ESP32 STT URL | `http://192.168.31.58:8787/stt` |
@@ -93,7 +94,8 @@ these fields to the ignored `tools/stt_config.json` on the Orange Pi:
   "image_task_poll_seconds": 2,
   "image_task_timeout_seconds": 180,
   "image_threshold": 210,
-  "image_fallback_local": true
+  "image_fallback_local": true,
+  "public_access_token": "generate_a_long_random_token_for_public_use"
 }
 ```
 
@@ -136,6 +138,30 @@ powershell -ExecutionPolicy Bypass -File .\tools\sync_orangepi_config.ps1
 the example config. `sync_orangepi_config.ps1` copies the config to the Orange
 Pi and restarts the bridge.
 
+## Public HTTPS Endpoint
+
+`https://api.jpxh.top/health` is reachable from the public internet and returns
+bridge health, so the domain is already suitable as an external entry point. Do
+not leave the drawing and STT endpoints open on a public domain. Set
+`public_access_token` in the ignored `tools/stt_config.json` before using:
+
+```json
+{
+  "public_access_token": "a_long_random_value"
+}
+```
+
+When this token is set:
+
+- `GET /health` remains public for monitoring.
+- `POST /stt`, `GET /draw`, and `GET /print` require either
+  `X-VoiceSketch-Token: <token>` or `Authorization: Bearer <token>`.
+- ESP32 and the mini program should use backend base URL
+  `https://api.jpxh.top`, not `/stt`.
+
+If you use Cloudflare or another reverse proxy, keep Python bound behind the
+proxy when possible and avoid exposing raw port `8787` directly to the internet.
+
 ## Manage The Service
 
 SSH into the Orange Pi:
@@ -177,6 +203,7 @@ From Windows:
 Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.31.58:8787/health"
 Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.31.58:8787/draw?text=cat"
 Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.31.58:8787/print?text=cat"
+Invoke-WebRequest -UseBasicParsing -Uri "https://api.jpxh.top/health"
 ```
 
 From the Orange Pi:

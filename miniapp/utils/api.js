@@ -22,12 +22,20 @@ function buildUrl(path, params, baseUrl) {
 }
 
 function request(options) {
+  const config = loadConfig();
+  const headers = {
+    ...(options.header || {}),
+  };
+  if (config.backend.accessToken) {
+    headers['X-VoiceSketch-Token'] = config.backend.accessToken;
+  }
+
   return new Promise((resolve, reject) => {
     wx.request({
       url: options.url,
       method: options.method || 'GET',
       data: options.data,
-      header: options.header || {},
+      header: headers,
       timeout: options.timeout || 20000,
       success(res) {
         if (res.statusCode >= 200 && res.statusCode < 300) {
