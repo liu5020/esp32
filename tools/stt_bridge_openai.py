@@ -66,6 +66,11 @@ def parse_bool(value: object, default: bool = False) -> bool:
 
 def load_config(path: Path) -> dict[str, object]:
     config: dict[str, object] = {
+        "stt_provider": "dashscope_paraformer",
+        "stt_api_key": "",
+        "stt_model": "paraformer-realtime-v2",
+        "stt_format": "wav",
+        "stt_sample_rate": 16000,
         "api_key": "",
         "transcriptions_url": DEFAULT_TRANSCRIPTIONS_URL,
         "model": "gpt-4o-mini-transcribe",
@@ -99,6 +104,21 @@ def load_config(path: Path) -> dict[str, object]:
                 config[key] = value
 
     # Environment variables still work and override the file when present.
+    config["stt_provider"] = os.environ.get("STT_PROVIDER", str(config["stt_provider"]))
+    config["stt_api_key"] = (
+        os.environ.get("STT_API_KEY")
+        or os.environ.get("DASHSCOPE_API_KEY")
+        or os.environ.get("ALIYUN_API_KEY")
+        or config["stt_api_key"]
+    )
+    config["stt_model"] = (
+        os.environ.get("DASHSCOPE_STT_MODEL")
+        or os.environ.get("ALIYUN_STT_MODEL")
+        or os.environ.get("STT_MODEL")
+        or config["stt_model"]
+    )
+    config["stt_format"] = os.environ.get("STT_FORMAT", str(config["stt_format"]))
+    config["stt_sample_rate"] = os.environ.get("STT_SAMPLE_RATE", config["stt_sample_rate"])
     config["api_key"] = os.environ.get("STT_API_KEY") or os.environ.get("OPENAI_API_KEY") or config["api_key"]
     config["transcriptions_url"] = os.environ.get("STT_TRANSCRIPTIONS_URL", config["transcriptions_url"])
     config["model"] = os.environ.get("STT_MODEL") or os.environ.get("OPENAI_TRANSCRIBE_MODEL", config["model"])
@@ -153,6 +173,19 @@ def get_config_int(key: str, default: int) -> int:
         return default
 
 
+def get_stt_provider() -> str:
+    return get_config_str("stt_provider", "dashscope_paraformer").strip().lower()
+
+
+def get_stt_api_key() -> str:
+    key = get_config_str("stt_api_key")
+    if key:
+        return key
+    if get_stt_provider() in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer"):
+        return get_config_str("image_api_key")
+    return get_config_str("api_key")
+
+
 def mask_secret(value: str) -> str:
     if not value or value == "PUT_YOUR_API_KEY_HERE":
         return "(not set)"
@@ -162,16 +195,21 @@ def mask_secret(value: str) -> str:
 
 
 def print_config_warnings() -> None:
-    api_key = get_config_str("api_key")
+    api_key = get_stt_api_key()
     endpoint = get_config_str("transcriptions_url")
+    stt_provider = get_stt_provider()
     image_provider = get_config_str("image_provider", "local").lower()
     image_api_key = get_config_str("image_api_key")
 
-    if "api.groq.com" in endpoint and not api_key.startswith("gsk_"):
+    if stt_provider in ("openai", "openai_compatible", "groq") and "api.groq.com" in endpoint and not api_key.startswith("gsk_"):
         print("WARNING: Groq endpoint is selected, but api_key does not start with gsk_.", flush=True)
 
     if "..." in api_key:
-        print("WARNING: api_key contains '...'. The dashboard masked key cannot be used.", flush=True)
+        print("WARNING: STT api key contains '...'. The dashboard masked key cannot be used.", flush=True)
+
+    if stt_provider in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer"):
+        if not api_key or api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
+            print("WARNING: DashScope STT key is not set. Set stt_api_key or image_api_key.", flush=True)
 
     if image_provider in ("aliyun", "aliyun_wanx", "dashscope", "wanx"):
         if not image_api_key or image_api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
@@ -938,6 +976,72 @@ def transcribe_with_openai(wav_bytes: bytes) -> str:
     return text
 
 
+def extract_dashscope_text(result: object) -> str:
+    sentences: object = None
+    if hasattr(result, "get_sentence"):
+        sentences = result.get_sentence()
+    if not sentences and isinstance(result, dict):
+        output = result.get("output")
+        if isinstance(output, dict):
+            sentences = output.get("sentence")
+
+    parts: list[str] = []
+    if isinstance(sentences, dict):
+        text = sentences.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    elif isinstance(sentences, list):
+        for sentence in sentences:
+            if not isinstance(sentence, dict):
+                continue
+            text = sentence.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+
+    text = "".join(parts).strip()
+    if not text:
+        raise RuntimeError(f"DashScope response did not contain text: {result!r}")
+    return text
+
+
+def transcribe_with_dashscope(wav_path: Path) -> str:
+    api_key = get_stt_api_key()
+    if not api_key or api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
+        raise RuntimeError("DashScope STT key is not set. Set stt_api_key or image_api_key.")
+
+    try:
+        import dashscope
+        from dashscope.audio.asr import Recognition, RecognitionCallback
+    except ImportError as exc:
+        raise RuntimeError("dashscope is required for Aliyun STT. Install with: python -m pip install dashscope") from exc
+
+    dashscope.api_key = api_key
+
+    class Callback(RecognitionCallback):
+        pass
+
+    recognizer = Recognition(
+        model=get_config_str("stt_model", "paraformer-realtime-v2"),
+        callback=Callback(),
+        format=get_config_str("stt_format", "wav"),
+        sample_rate=get_config_int("stt_sample_rate", 16000),
+    )
+    result = recognizer.call(str(wav_path))
+    status_code = result.get("status_code") if isinstance(result, dict) else getattr(result, "status_code", None)
+    if status_code is not None and str(status_code) not in ("200", "HTTPStatus.OK"):
+        code = result.get("code", "") if isinstance(result, dict) else getattr(result, "code", "")
+        message = result.get("message", "") if isinstance(result, dict) else getattr(result, "message", "")
+        raise RuntimeError(f"DashScope STT error: {code} {message}".strip())
+    return extract_dashscope_text(result)
+
+
+def transcribe_audio(wav_bytes: bytes, wav_path: Path) -> str:
+    provider = get_stt_provider()
+    if provider in ("dashscope", "dashscope_paraformer", "aliyun", "aliyun_paraformer"):
+        return transcribe_with_dashscope(wav_path)
+    return transcribe_with_openai(wav_bytes)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ESP32STTBridge/1.0"
 
@@ -946,7 +1050,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             self.send_json(200, {
                 "ok": True,
-                "model": get_config_str("model"),
+                "stt_provider": get_stt_provider(),
+                "stt_model": get_config_str("stt_model"),
                 "image_provider": get_config_str("image_provider", "local"),
                 "image_model": get_config_str("image_model"),
             })
@@ -1010,7 +1115,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"saved wav: {saved_path}", flush=True)
 
         try:
-            text = transcribe_with_openai(wav_bytes)
+            text = transcribe_audio(wav_bytes, saved_path)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             print(f"STT HTTP error {exc.code}: {detail}", file=sys.stderr, flush=True)
@@ -1070,9 +1175,16 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"STT bridge listening on http://{args.host}:{args.port}/stt", flush=True)
     print(f"config={config_path}", flush=True)
-    print(f"endpoint={get_config_str('transcriptions_url')}", flush=True)
-    print(f"model={get_config_str('model')} language={get_config_str('language') or '(auto)'}", flush=True)
-    print(f"api_key={mask_secret(get_config_str('api_key'))}", flush=True)
+    print(
+        f"stt_provider={get_stt_provider()} "
+        f"stt_model={get_config_str('stt_model')} "
+        f"stt_format={get_config_str('stt_format')} "
+        f"stt_sample_rate={get_config_int('stt_sample_rate', 16000)}",
+        flush=True,
+    )
+    print(f"stt_api_key={mask_secret(get_stt_api_key())}", flush=True)
+    print(f"openai_compatible_endpoint={get_config_str('transcriptions_url')}", flush=True)
+    print(f"openai_compatible_model={get_config_str('model')} language={get_config_str('language') or '(auto)'}", flush=True)
     print(
         f"image_provider={get_config_str('image_provider', 'local')} "
         f"image_model={get_config_str('image_model')}",

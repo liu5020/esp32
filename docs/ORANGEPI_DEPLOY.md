@@ -64,12 +64,17 @@ python3 -m pip install --user -r tools/requirements.txt
 
 ## Image Generation Config
 
-The bridge can call Alibaba Cloud Model Studio / DashScope text-to-image and
-then convert the PNG result into screen and printer bitmaps. Add these fields to
-the ignored `tools/stt_config.json` on the Orange Pi:
+The bridge uses Alibaba Cloud DashScope Paraformer for speech-to-text and
+Alibaba Cloud Model Studio / DashScope text-to-image for sketch generation. Add
+these fields to the ignored `tools/stt_config.json` on the Orange Pi:
 
 ```json
 {
+  "stt_provider": "dashscope_paraformer",
+  "stt_api_key": "",
+  "stt_model": "paraformer-realtime-v2",
+  "stt_format": "wav",
+  "stt_sample_rate": 16000,
   "image_provider": "aliyun_wanx",
   "image_api_key": "your_dashscope_api_key",
   "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
@@ -87,8 +92,8 @@ the ignored `tools/stt_config.json` on the Orange Pi:
 }
 ```
 
-Keep the existing STT fields in the same JSON file. The STT key and the
-DashScope image key are separate. If `image_api_key` is missing or the image
+If `stt_api_key` is empty, the bridge reuses `image_api_key`, so one DashScope
+API key is enough for both speech recognition and image generation. If the image
 API fails, `image_fallback_local: true` keeps the old local sketch generator
 working.
 

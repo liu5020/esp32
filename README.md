@@ -149,7 +149,12 @@ key on the ESP32.
 
    ```json
    {
-     "api_key": "your_api_key",
+     "stt_provider": "dashscope_paraformer",
+     "stt_api_key": "",
+     "stt_model": "paraformer-realtime-v2",
+     "stt_format": "wav",
+     "stt_sample_rate": 16000,
+     "api_key": "optional_openai_or_groq_key",
      "transcriptions_url": "https://api.groq.com/openai/v1/audio/transcriptions",
      "model": "whisper-large-v3-turbo",
      "language": "zh",
@@ -170,8 +175,13 @@ key on the ESP32.
    }
    ```
 
-   This default uses Groq's OpenAI-compatible Whisper endpoint. For OpenAI direct
-   use, set:
+   This default uses Alibaba Cloud DashScope Paraformer for speech-to-text and
+   Alibaba Cloud Model Studio / DashScope for image generation. If `stt_api_key`
+   is empty, the bridge reuses `image_api_key`, so one DashScope API key is
+   enough for both STT and image generation.
+
+   Groq or OpenAI-compatible speech-to-text is still available as a fallback.
+   Set `stt_provider` to `openai_compatible`, then configure:
 
    ```json
    {
@@ -182,9 +192,9 @@ key on the ESP32.
    }
    ```
 
-   The relay must support multipart `POST /v1/audio/transcriptions`. A text-only
-   relay for `/v1/chat/completions` or `/v1/responses` will not work for speech
-   to text.
+   An OpenAI-compatible relay must support multipart
+   `POST /v1/audio/transcriptions`. A text-only relay for
+   `/v1/chat/completions` or `/v1/responses` will not work for speech to text.
 
    To edit the config locally and sync it to the Orange Pi without using SSH
    editors:

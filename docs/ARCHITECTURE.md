@@ -53,7 +53,8 @@ flowchart LR
 
 - Stores AI provider API keys.
 - Accepts WAV audio from the ESP32.
-- Calls speech-to-text.
+- Calls speech-to-text. The current backend uses Alibaba Cloud DashScope
+  Paraformer for direct WAV speech recognition.
 - Converts the recognized text into a simple black-and-white sketch.
   The current backend can call Alibaba Cloud Model Studio / DashScope
   text-to-image, then convert the generated PNG into one-bit bitmaps.
