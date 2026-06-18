@@ -140,12 +140,33 @@ key on the ESP32.
 2. Copy `tools/stt_config.example.json` to `tools/stt_config.json`, then edit
    `tools/stt_config.json`.
 
+   If `tools/stt_config.json` already exists, run this helper to add any new
+   missing fields without replacing your existing STT key:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\tools\prepare_local_config.ps1
+   ```
+
    ```json
    {
      "api_key": "your_api_key",
      "transcriptions_url": "https://api.groq.com/openai/v1/audio/transcriptions",
      "model": "whisper-large-v3-turbo",
-     "language": "zh"
+     "language": "zh",
+     "image_provider": "aliyun_wanx",
+     "image_api_key": "your_dashscope_api_key",
+     "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
+     "image_task_url_template": "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}",
+     "image_model": "wan2.2-t2i-flash",
+     "image_call_mode": "auto",
+     "image_payload_format": "auto",
+     "image_size": "1024*1024",
+     "image_prompt_extend": true,
+     "image_watermark": false,
+     "image_task_poll_seconds": 2,
+     "image_task_timeout_seconds": 180,
+     "image_threshold": 210,
+     "image_fallback_local": true
    }
    ```
 
@@ -165,15 +186,29 @@ key on the ESP32.
    relay for `/v1/chat/completions` or `/v1/responses` will not work for speech
    to text.
 
-3. Run the bridge on your computer.
+   To edit the config locally and sync it to the Orange Pi without using SSH
+   editors:
+
+   ```powershell
+   notepad .\tools\stt_config.json
+   powershell -ExecutionPolicy Bypass -File .\tools\sync_orangepi_config.ps1
+   ```
+
+3. Install the bridge dependencies.
+
+   ```powershell
+   python -m pip install -r D:\Work\esp32\project\voice_ai_mic\tools\requirements.txt
+   ```
+
+4. Run the bridge on your computer.
 
    ```powershell
    python D:\Work\esp32\project\voice_ai_mic\tools\stt_bridge_openai.py
    ```
 
-4. Rebuild and upload the ESP32 firmware.
+5. Rebuild and upload the ESP32 firmware.
 
-5. Open serial monitor at `921600`, send `s`, and speak for 5 seconds.
+6. Open serial monitor at `921600`, send `s`, and speak for 5 seconds.
 
 The screen will show `speak now`, then `thinking`, then `stt ok` if the bridge
 returns recognized text. The transcript is printed in the serial monitor. The
@@ -190,15 +225,25 @@ The sketch preview is intentionally black-and-white because the same bitmap
 format can later be sent to a thermal printer. The bridge saves generated PBM
 files under `tools/sketches/` and updates:
 
+- `tools/sketches/latest_source.png`: latest AI source image, when an image API
+  is used.
 - `tools/sketches/latest_preview.pbm`: 160x160 screen preview.
 - `tools/sketches/latest_print.pbm`: 384x384 thermal-printer preview.
 - `tools/sketches/latest.pbm`: compatibility alias for the screen preview.
 
 Send `d` in the serial monitor to test the screen drawing path without
-recording audio. The current generator is a local rule-based placeholder for
-common words such as cat, dog, house, tree, flower, car, fish, person,
-mountain, and star. Replace that generator with a real image/LLM service once
-the screen and printer bitmap pipeline is stable.
+recording audio. The bridge first tries the configured image provider. With
+`image_provider` set to `aliyun_wanx`, it calls Alibaba Cloud Model Studio /
+DashScope text-to-image, downloads the generated PNG, and converts it to one-bit
+screen and printer bitmaps. The default `image_model` is `wan2.2-t2i-flash`
+because it is intended as a lower-cost fast image model. `image_call_mode:
+auto` uses synchronous calls for `wan2.6-t2i` and asynchronous task polling for
+other WanX image models; `image_payload_format: auto` switches between the
+newer messages payload and the older prompt payload. If the image API is not
+configured or fails and
+`image_fallback_local` is true, the bridge falls back to the local rule-based
+placeholder for common words such as cat, dog, house, tree, flower, car, fish,
+person, mountain, and star.
 
 If the ESP32 prints `Could not connect to STT server`, check:
 

@@ -55,6 +55,8 @@ flowchart LR
 - Accepts WAV audio from the ESP32.
 - Calls speech-to-text.
 - Converts the recognized text into a simple black-and-white sketch.
+  The current backend can call Alibaba Cloud Model Studio / DashScope
+  text-to-image, then convert the generated PNG into one-bit bitmaps.
 - Produces two bitmap targets:
   - screen preview bitmap, currently 160x160, one bit per pixel.
   - printer bitmap, later 384 dots wide for the thermal printer.
@@ -105,17 +107,18 @@ Current response shape for sketch-capable calls:
 }
 ```
 
-The current sketch generator is intentionally a placeholder. It uses local
-rules for common words like cat, dog, house, tree, flower, car, fish, person,
-mountain, and star. This keeps the ESP32 screen pipeline stable before adding
-real AI drawing.
+The sketch generator keeps a local fallback for common words like cat, dog,
+house, tree, flower, car, fish, person, mountain, and star. The normal backend
+path can use Alibaba Cloud Model Studio / DashScope to generate a source PNG,
+then convert it to one-bit preview and printer bitmaps.
 
 ## Server Roadmap
 
 1. Keep the current Python server as the development backend.
 2. Keep the stable response contract for both preview and printer bitmaps.
 3. Generate and save a 384-dot-wide printer PBM even before the printer arrives.
-4. Replace the local rule-based sketch generator with an AI line-art generator.
+4. Tune the AI line-art prompt and bitmap threshold using real screen and print
+   samples.
 5. Add a job folder or tiny database for history and debugging.
 6. Add BLE-based configuration later so the mobile app can set WiFi and server
    URL without editing firmware headers.

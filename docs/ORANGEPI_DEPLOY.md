@@ -31,13 +31,15 @@ The server stores generated PBM sketch previews in:
 The latest generated images are:
 
 ```text
+~/voice_ai_mic_server/tools/sketches/latest_source.png
 ~/voice_ai_mic_server/tools/sketches/latest_preview.pbm
 ~/voice_ai_mic_server/tools/sketches/latest_print.pbm
 ~/voice_ai_mic_server/tools/sketches/latest.pbm
 ```
 
-`latest_preview.pbm` is the 160x160 screen preview. `latest_print.pbm` is the
-384x384 thermal-printer preview.
+`latest_source.png` is the latest AI-generated source image, when an image API
+is used. `latest_preview.pbm` is the 160x160 screen preview.
+`latest_print.pbm` is the 384x384 thermal-printer preview.
 
 ## Files Deployed
 
@@ -47,9 +49,67 @@ Only these files are needed for the current bridge:
 tools/stt_bridge_openai.py
 tools/stt_config.json
 tools/orangepi_bridge.sh
+tools/requirements.txt
 ```
 
 `tools/stt_config.json` contains the API key and must stay out of Git.
+
+Install the Python dependency used to convert AI images into one-bit thermal
+printer bitmaps:
+
+```bash
+cd ~/voice_ai_mic_server
+python3 -m pip install --user -r tools/requirements.txt
+```
+
+## Image Generation Config
+
+The bridge can call Alibaba Cloud Model Studio / DashScope text-to-image and
+then convert the PNG result into screen and printer bitmaps. Add these fields to
+the ignored `tools/stt_config.json` on the Orange Pi:
+
+```json
+{
+  "image_provider": "aliyun_wanx",
+  "image_api_key": "your_dashscope_api_key",
+  "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
+  "image_task_url_template": "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}",
+  "image_model": "wan2.2-t2i-flash",
+  "image_call_mode": "auto",
+  "image_payload_format": "auto",
+  "image_size": "1024*1024",
+  "image_prompt_extend": true,
+  "image_watermark": false,
+  "image_task_poll_seconds": 2,
+  "image_task_timeout_seconds": 180,
+  "image_threshold": 210,
+  "image_fallback_local": true
+}
+```
+
+Keep the existing STT fields in the same JSON file. The STT key and the
+DashScope image key are separate. If `image_api_key` is missing or the image
+API fails, `image_fallback_local: true` keeps the old local sketch generator
+working.
+
+The default image model is `wan2.2-t2i-flash` for lower-cost testing.
+`image_call_mode: auto` uses synchronous calls for `wan2.6-t2i` and asynchronous
+task polling for other WanX image models. `image_payload_format: auto` switches
+between the newer messages payload and the older prompt payload.
+
+You do not need to edit JSON inside SSH. Edit the ignored local config on
+Windows, then upload and restart:
+
+```powershell
+cd D:\Work\esp32\project\voice_ai_mic
+powershell -ExecutionPolicy Bypass -File .\tools\prepare_local_config.ps1
+notepad .\tools\stt_config.json
+powershell -ExecutionPolicy Bypass -File .\tools\sync_orangepi_config.ps1
+```
+
+`prepare_local_config.ps1` keeps existing keys and only adds missing fields from
+the example config. `sync_orangepi_config.ps1` copies the config to the Orange
+Pi and restarts the bridge.
 
 ## Manage The Service
 
@@ -110,5 +170,6 @@ The backend now creates a thermal-printer preview target:
 recognized text -> 160x160 screen bitmap + 384-dot-wide printer bitmap
 ```
 
-The next backend feature should replace the local rule-based drawing placeholder
-with an AI line-art generator that still outputs clean one-bit bitmaps.
+The current backend can use Alibaba Cloud Model Studio / DashScope for AI
+line-art generation, then converts the generated PNG into clean one-bit bitmaps.
+Next, tune the prompt and `image_threshold` using real printed samples.

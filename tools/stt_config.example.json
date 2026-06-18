@@ -2,6 +2,19 @@
   "api_key": "PUT_YOUR_API_KEY_HERE",
   "transcriptions_url": "https://api.groq.com/openai/v1/audio/transcriptions",
   "model": "whisper-large-v3-turbo",
-  "language": "zh"
+  "language": "zh",
+  "image_provider": "aliyun_wanx",
+  "image_api_key": "PUT_YOUR_DASHSCOPE_API_KEY_HERE",
+  "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
+  "image_task_url_template": "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}",
+  "image_model": "wan2.2-t2i-flash",
+  "image_call_mode": "auto",
+  "image_payload_format": "auto",
+  "image_size": "1024*1024",
+  "image_prompt_extend": true,
+  "image_watermark": false,
+  "image_task_poll_seconds": 2,
+  "image_task_timeout_seconds": 180,
+  "image_threshold": 210,
+  "image_fallback_local": true
 }
-

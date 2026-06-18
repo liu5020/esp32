@@ -14,6 +14,7 @@ You can configure it with tools/stt_config.json or environment variables.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from pathlib import Path
 import shutil
 import socket
 import sys
+import time
 from datetime import datetime
 import uuid
 import urllib.error
@@ -30,6 +32,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 DEFAULT_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+DEFAULT_IMAGE_GENERATION_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+DEFAULT_LEGACY_IMAGE_GENERATION_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+DEFAULT_IMAGE_TASK_URL_TEMPLATE = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+DEFAULT_IMAGE_NEGATIVE_PROMPT = (
+    "color, grayscale, shadow, shading, gradient, photo, realistic texture, text, "
+    "watermark, logo, low contrast, messy background, filled black background"
+)
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("stt_config.json")
 DEFAULT_RECORDINGS_DIR = Path(__file__).with_name("recordings")
 DEFAULT_SKETCHES_DIR = Path(__file__).with_name("sketches")
@@ -37,26 +46,56 @@ SKETCH_WIDTH = 160
 SKETCH_HEIGHT = 160
 PRINT_WIDTH = 384
 PRINT_HEIGHT = 384
-CONFIG: dict[str, str] = {}
+CONFIG: dict[str, object] = {}
 RECORDINGS_DIR = DEFAULT_RECORDINGS_DIR
 SKETCHES_DIR = DEFAULT_SKETCHES_DIR
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 
-def load_config(path: Path) -> dict[str, str]:
-    config = {
+def parse_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    return default
+
+
+def load_config(path: Path) -> dict[str, object]:
+    config: dict[str, object] = {
         "api_key": "",
         "transcriptions_url": DEFAULT_TRANSCRIPTIONS_URL,
         "model": "gpt-4o-mini-transcribe",
         "language": "zh",
+        "image_provider": "aliyun_wanx",
+        "image_api_key": "",
+        "image_generation_url": DEFAULT_LEGACY_IMAGE_GENERATION_URL,
+        "image_task_url_template": DEFAULT_IMAGE_TASK_URL_TEMPLATE,
+        "image_model": "wan2.2-t2i-flash",
+        "image_call_mode": "auto",
+        "image_payload_format": "auto",
+        "image_size": "1024*1024",
+        "image_prompt_extend": True,
+        "image_watermark": False,
+        "image_negative_prompt": DEFAULT_IMAGE_NEGATIVE_PROMPT,
+        "image_task_poll_seconds": 2,
+        "image_task_timeout_seconds": 180,
+        "image_threshold": 210,
+        "image_autocontrast_cutoff": 2,
+        "image_fallback_local": True,
     }
 
     if path.exists():
-        with path.open("r", encoding="utf-8") as f:
+        # Windows PowerShell 5 writes UTF-8 JSON with a BOM by default.
+        # utf-8-sig accepts both BOM and non-BOM files.
+        with path.open("r", encoding="utf-8-sig") as f:
             file_config = json.load(f)
         for key in config:
             value = file_config.get(key)
-            if isinstance(value, str) and value:
+            if value is not None and value != "":
                 config[key] = value
 
     # Environment variables still work and override the file when present.
@@ -64,7 +103,54 @@ def load_config(path: Path) -> dict[str, str]:
     config["transcriptions_url"] = os.environ.get("STT_TRANSCRIPTIONS_URL", config["transcriptions_url"])
     config["model"] = os.environ.get("STT_MODEL") or os.environ.get("OPENAI_TRANSCRIBE_MODEL", config["model"])
     config["language"] = os.environ.get("STT_LANGUAGE") or os.environ.get("OPENAI_TRANSCRIBE_LANGUAGE", config["language"])
+    config["image_provider"] = os.environ.get("IMAGE_PROVIDER", str(config["image_provider"]))
+    config["image_api_key"] = (
+        os.environ.get("IMAGE_API_KEY")
+        or os.environ.get("DASHSCOPE_API_KEY")
+        or os.environ.get("ALIYUN_API_KEY")
+        or config["image_api_key"]
+    )
+    config["image_generation_url"] = os.environ.get("IMAGE_GENERATION_URL", str(config["image_generation_url"]))
+    config["image_task_url_template"] = os.environ.get(
+        "IMAGE_TASK_URL_TEMPLATE", str(config["image_task_url_template"])
+    )
+    config["image_model"] = os.environ.get("IMAGE_MODEL", str(config["image_model"]))
+    config["image_call_mode"] = os.environ.get("IMAGE_CALL_MODE", str(config["image_call_mode"]))
+    config["image_payload_format"] = os.environ.get("IMAGE_PAYLOAD_FORMAT", str(config["image_payload_format"]))
+    config["image_size"] = os.environ.get("IMAGE_SIZE", str(config["image_size"]))
+    if "IMAGE_PROMPT_EXTEND" in os.environ:
+        config["image_prompt_extend"] = parse_bool(os.environ.get("IMAGE_PROMPT_EXTEND"), True)
+    if "IMAGE_WATERMARK" in os.environ:
+        config["image_watermark"] = parse_bool(os.environ.get("IMAGE_WATERMARK"), False)
+    if "IMAGE_NEGATIVE_PROMPT" in os.environ:
+        config["image_negative_prompt"] = os.environ["IMAGE_NEGATIVE_PROMPT"]
+    if "IMAGE_THRESHOLD" in os.environ:
+        config["image_threshold"] = os.environ["IMAGE_THRESHOLD"]
+    if "IMAGE_TASK_POLL_SECONDS" in os.environ:
+        config["image_task_poll_seconds"] = os.environ["IMAGE_TASK_POLL_SECONDS"]
+    if "IMAGE_TASK_TIMEOUT_SECONDS" in os.environ:
+        config["image_task_timeout_seconds"] = os.environ["IMAGE_TASK_TIMEOUT_SECONDS"]
+    if "IMAGE_FALLBACK_LOCAL" in os.environ:
+        config["image_fallback_local"] = parse_bool(os.environ.get("IMAGE_FALLBACK_LOCAL"), True)
     return config
+
+
+def get_config_str(key: str, default: str = "") -> str:
+    value = CONFIG.get(key, default)
+    if value is None:
+        return default
+    return str(value)
+
+
+def get_config_bool(key: str, default: bool = False) -> bool:
+    return parse_bool(CONFIG.get(key, default), default)
+
+
+def get_config_int(key: str, default: int) -> int:
+    try:
+        return int(CONFIG.get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def mask_secret(value: str) -> str:
@@ -76,14 +162,22 @@ def mask_secret(value: str) -> str:
 
 
 def print_config_warnings() -> None:
-    api_key = CONFIG.get("api_key", "")
-    endpoint = CONFIG.get("transcriptions_url", "")
+    api_key = get_config_str("api_key")
+    endpoint = get_config_str("transcriptions_url")
+    image_provider = get_config_str("image_provider", "local").lower()
+    image_api_key = get_config_str("image_api_key")
 
     if "api.groq.com" in endpoint and not api_key.startswith("gsk_"):
         print("WARNING: Groq endpoint is selected, but api_key does not start with gsk_.", flush=True)
 
     if "..." in api_key:
         print("WARNING: api_key contains '...'. The dashboard masked key cannot be used.", flush=True)
+
+    if image_provider in ("aliyun", "aliyun_wanx", "dashscope", "wanx"):
+        if not image_api_key or image_api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
+            print("WARNING: image_api_key is not set. Image generation will fall back to local sketches.", flush=True)
+        elif "..." in image_api_key:
+            print("WARNING: image_api_key contains '...'. The dashboard masked key cannot be used.", flush=True)
 
 
 def save_recording(wav_bytes: bytes, client_ip: str) -> Path:
@@ -417,10 +511,335 @@ def generate_print_sketch(preview_sketch: dict[str, object]) -> dict[str, object
     return scale_sketch_nearest(preview_sketch, PRINT_WIDTH, PRINT_HEIGHT)
 
 
-def generate_sketch_pair(text: str) -> tuple[dict[str, object], dict[str, object]]:
+def save_source_image(image_bytes: bytes) -> Path:
+    SKETCHES_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = SKETCHES_DIR / f"{timestamp}_source.png"
+    path.write_bytes(image_bytes)
+    try:
+        shutil.copyfile(path, SKETCHES_DIR / "latest_source.png")
+    except OSError:
+        pass
+    return path
+
+
+def build_image_prompt(text: str) -> str:
+    subject = text.strip() or "a cute simple doodle"
+    return (
+        "Create a child-friendly black-and-white coloring-book outline drawing. "
+        f"Draw only this harmless subject: {subject}. "
+        "Use a pure white background, centered composition, simple rounded shapes, "
+        "bold clean black outlines, no color, no gray, no shading, no text, no watermark, "
+        "no realistic details, no scary expression."
+    )
+
+
+def extract_first_url(value: object) -> str:
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return value
+    if isinstance(value, dict):
+        for key in ("image", "url"):
+            found = extract_first_url(value.get(key))
+            if found:
+                return found
+        for child in value.values():
+            found = extract_first_url(child)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = extract_first_url(child)
+            if found:
+                return found
+    return ""
+
+
+def extract_aliyun_image_url(payload: dict[str, object]) -> str:
+    output = payload.get("output")
+    if isinstance(output, dict):
+        choices = output.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if isinstance(item, dict) and isinstance(item.get("image"), str):
+                        return item["image"]
+
+        found_url = extract_first_url(output)
+        if found_url:
+            return found_url
+
+    code = payload.get("code")
+    message = payload.get("message")
+    if code or message:
+        raise RuntimeError(f"Aliyun image response error: {code or 'unknown'} {message or ''}".strip())
+    raise RuntimeError(f"Aliyun image response did not contain an image URL: {payload!r}")
+
+
+def get_image_payload_format() -> str:
+    configured = get_config_str("image_payload_format", "auto").strip().lower()
+    if configured in ("legacy", "messages"):
+        return configured
+    model = get_config_str("image_model", "wan2.2-t2i-flash").strip().lower()
+    return "messages" if model == "wan2.6-t2i" else "legacy"
+
+
+def get_aliyun_generation_url() -> str:
+    configured = get_config_str("image_generation_url", "")
+    model = get_config_str("image_model", "wan2.2-t2i-flash").strip().lower()
+    if model == "wan2.6-t2i":
+        if not configured or configured == DEFAULT_LEGACY_IMAGE_GENERATION_URL:
+            return DEFAULT_IMAGE_GENERATION_URL
+        return configured
+    if not configured or configured == DEFAULT_IMAGE_GENERATION_URL:
+        return DEFAULT_LEGACY_IMAGE_GENERATION_URL
+    return configured
+
+
+def build_aliyun_image_payload(text: str) -> dict[str, object]:
+    model = get_config_str("image_model", "wan2.2-t2i-flash")
+    prompt = build_image_prompt(text)
+    parameters = {
+        "n": 1,
+        "size": get_config_str("image_size", "1024*1024"),
+        "watermark": get_config_bool("image_watermark", False),
+    }
+
+    if get_image_payload_format() == "messages":
+        parameters["prompt_extend"] = get_config_bool("image_prompt_extend", True)
+        parameters["negative_prompt"] = get_config_str("image_negative_prompt", DEFAULT_IMAGE_NEGATIVE_PROMPT)
+        return {
+            "model": model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": prompt,
+                            }
+                        ],
+                    }
+                ]
+            },
+            "parameters": parameters,
+        }
+
+    return {
+        "model": model,
+        "input": {
+            "prompt": prompt,
+            "negative_prompt": get_config_str("image_negative_prompt", DEFAULT_IMAGE_NEGATIVE_PROMPT),
+        },
+        "parameters": parameters,
+    }
+
+
+def is_async_image_call() -> bool:
+    mode = get_config_str("image_call_mode", "auto").strip().lower()
+    if mode in ("async", "task"):
+        return True
+    if mode == "sync":
+        return False
+    model = get_config_str("image_model", "wan2.2-t2i-flash").strip().lower()
+    return model != "wan2.6-t2i"
+
+
+def open_aliyun_json(payload: dict[str, object], async_call: bool = False) -> dict[str, object]:
+    api_key = get_config_str("image_api_key")
+    if not api_key or api_key == "PUT_YOUR_DASHSCOPE_API_KEY_HERE":
+        raise RuntimeError("image_api_key is not set")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "esp32-voice-ai-mic/1.0",
+    }
+    if async_call:
+        headers["X-DashScope-Async"] = "enable"
+
+    request = urllib.request.Request(
+        get_aliyun_generation_url(),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Aliyun image HTTP error {exc.code}: {detail}") from exc
+
+
+def get_aliyun_task_id(payload: dict[str, object]) -> str:
+    output = payload.get("output")
+    if isinstance(output, dict) and isinstance(output.get("task_id"), str):
+        return output["task_id"]
+    if isinstance(payload.get("task_id"), str):
+        return str(payload["task_id"])
+    raise RuntimeError(f"Aliyun async response did not contain task_id: {payload!r}")
+
+
+def poll_aliyun_task(task_id: str) -> dict[str, object]:
+    api_key = get_config_str("image_api_key")
+    timeout_seconds = max(10, get_config_int("image_task_timeout_seconds", 180))
+    poll_seconds = max(1, get_config_int("image_task_poll_seconds", 2))
+    deadline = time.monotonic() + timeout_seconds
+    template = get_config_str("image_task_url_template", DEFAULT_IMAGE_TASK_URL_TEMPLATE)
+    url = template.format(task_id=urllib.parse.quote(task_id, safe=""))
+
+    while True:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": "esp32-voice-ai-mic/1.0",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Aliyun task HTTP error {exc.code}: {detail}") from exc
+
+        output = payload.get("output")
+        status = ""
+        if isinstance(output, dict):
+            status = str(output.get("task_status", "")).upper()
+
+        if status in ("SUCCEEDED", "SUCCESS"):
+            return payload
+        if status in ("FAILED", "CANCELED", "CANCELLED"):
+            code = output.get("code") if isinstance(output, dict) else payload.get("code")
+            message = output.get("message") if isinstance(output, dict) else payload.get("message")
+            raise RuntimeError(f"Aliyun image task failed: {code or status} {message or ''}".strip())
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Aliyun image task timed out after {timeout_seconds}s: {task_id}")
+
+        time.sleep(poll_seconds)
+
+
+def request_aliyun_image_bytes(text: str) -> bytes:
+    payload = build_aliyun_image_payload(text)
+    if is_async_image_call():
+        start_payload = open_aliyun_json(payload, async_call=True)
+        task_id = get_aliyun_task_id(start_payload)
+        print(f"aliyun image async task: {task_id}", flush=True)
+        response_payload = poll_aliyun_task(task_id)
+    else:
+        response_payload = open_aliyun_json(payload, async_call=False)
+
+    image_url = extract_aliyun_image_url(response_payload)
+    image_request = urllib.request.Request(
+        image_url,
+        headers={
+            "User-Agent": "esp32-voice-ai-mic/1.0",
+        },
+    )
+    with urllib.request.urlopen(image_request, timeout=90) as response:
+        return response.read()
+
+
+def flatten_image_on_white(image: object) -> object:
+    from PIL import Image
+
+    if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "WHITE")
+        background.alpha_composite(rgba)
+        return background.convert("RGB")
+    return image.convert("RGB")
+
+
+def image_bytes_to_sketch(image_bytes: bytes, width: int, height: int, title: str) -> dict[str, object]:
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for AI image conversion. Install with: python -m pip install pillow") from exc
+
+    image = Image.open(io.BytesIO(image_bytes))
+    image.load()
+    image = flatten_image_on_white(image)
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    fitted = ImageOps.contain(image, (width, height), resample)
+    canvas_image = Image.new("RGB", (width, height), "white")
+    canvas_image.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+
+    gray = ImageOps.grayscale(canvas_image)
+    cutoff = get_config_int("image_autocontrast_cutoff", 2)
+    gray = ImageOps.autocontrast(gray, cutoff=max(0, cutoff))
+
+    corners = [
+        gray.getpixel((0, 0)),
+        gray.getpixel((width - 1, 0)),
+        gray.getpixel((0, height - 1)),
+        gray.getpixel((width - 1, height - 1)),
+    ]
+    if sum(corners) / len(corners) < 128:
+        gray = ImageOps.invert(gray)
+
+    pixels = gray.load()
+    threshold = max(0, min(255, get_config_int("image_threshold", 210)))
+    canvas = MonoCanvas(width, height)
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y] < threshold:
+                canvas._set_pixel(x, y)
+
+    return {
+        "width": width,
+        "height": height,
+        "format": "1bpp_hex_msb_black1",
+        "title": title,
+        "bitmap": canvas.to_hex(),
+    }
+
+
+def generate_aliyun_wanx_sketch_pair(text: str) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    image_bytes = request_aliyun_image_bytes(text)
+    source_path = save_source_image(image_bytes)
+    print(f"saved source image: {source_path}", flush=True)
+    preview_sketch = image_bytes_to_sketch(image_bytes, SKETCH_WIDTH, SKETCH_HEIGHT, "aliyun_wanx")
+    print_sketch = image_bytes_to_sketch(image_bytes, PRINT_WIDTH, PRINT_HEIGHT, "aliyun_wanx")
+    return preview_sketch, print_sketch, {"image_provider": "aliyun_wanx", "source_image": str(source_path)}
+
+
+def generate_local_sketch_pair(text: str) -> tuple[dict[str, object], dict[str, object]]:
     preview_sketch = generate_preview_sketch(text)
     print_sketch = generate_print_sketch(preview_sketch)
     return preview_sketch, print_sketch
+
+
+def generate_sketch_pair(text: str) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    provider = get_config_str("image_provider", "local").strip().lower()
+    if provider in ("aliyun", "aliyun_wanx", "dashscope", "wanx"):
+        try:
+            return generate_aliyun_wanx_sketch_pair(text)
+        except Exception as exc:
+            if get_config_bool("image_fallback_local", True):
+                print(f"image generation failed, falling back to local sketch: {exc}", file=sys.stderr, flush=True)
+                preview_sketch, print_sketch = generate_local_sketch_pair(text)
+                return preview_sketch, print_sketch, {
+                    "image_provider": "local_fallback",
+                    "image_error": str(exc)[:500],
+                }
+            raise
+
+    preview_sketch, print_sketch = generate_local_sketch_pair(text)
+    return preview_sketch, print_sketch, {"image_provider": "local"}
 
 
 def save_sketch_pbm(sketch: dict[str, object], client_ip: str, label: str, latest_name: str) -> Path:
@@ -525,18 +944,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/health":
-            self.send_json(200, {"ok": True, "model": CONFIG.get("model", "")})
+            self.send_json(200, {
+                "ok": True,
+                "model": get_config_str("model"),
+                "image_provider": get_config_str("image_provider", "local"),
+                "image_model": get_config_str("image_model"),
+            })
             return
 
         if parsed.path == "/draw":
             query = urllib.parse.parse_qs(parsed.query)
             text = query.get("text", ["house"])[0]
-            preview_sketch, print_sketch = generate_sketch_pair(text)
+            preview_sketch, print_sketch, image_meta = generate_sketch_pair(text)
             preview_path, print_path = save_sketch_pair(preview_sketch, print_sketch, self.client_address[0])
             print(f"demo preview sketch: {preview_path}", flush=True)
             print(f"demo print sketch: {print_path}", flush=True)
-            self.send_json(200, {
+            payload = {
                 "text": text,
+                **image_meta,
                 "image": preview_sketch,
                 "print_image": {
                     "width": print_sketch["width"],
@@ -544,16 +969,17 @@ class Handler(BaseHTTPRequestHandler):
                     "format": print_sketch["format"],
                     "saved": str(print_path),
                 },
-            })
+            }
+            self.send_json(200, payload)
             return
 
         if parsed.path == "/print":
             query = urllib.parse.parse_qs(parsed.query)
             text = query.get("text", ["house"])[0]
-            preview_sketch, print_sketch = generate_sketch_pair(text)
+            preview_sketch, print_sketch, image_meta = generate_sketch_pair(text)
             _, print_path = save_sketch_pair(preview_sketch, print_sketch, self.client_address[0])
             print(f"print sketch: {print_path}", flush=True)
-            self.send_json(200, {"text": text, "image": print_sketch})
+            self.send_json(200, {"text": text, **image_meta, "image": print_sketch})
             return
 
         self.send_json(404, {"error": "not found"})
@@ -596,12 +1022,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         print(f"transcript: {text}", flush=True)
-        preview_sketch, print_sketch = generate_sketch_pair(text)
+        preview_sketch, print_sketch, image_meta = generate_sketch_pair(text)
         preview_path, print_path = save_sketch_pair(preview_sketch, print_sketch, self.client_address[0])
         print(f"saved preview sketch: {preview_path}", flush=True)
         print(f"saved print sketch: {print_path}", flush=True)
         self.send_json(200, {
             "text": text,
+            **image_meta,
             "image": preview_sketch,
             "print_image": {
                 "width": print_sketch["width"],
@@ -643,9 +1070,15 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"STT bridge listening on http://{args.host}:{args.port}/stt", flush=True)
     print(f"config={config_path}", flush=True)
-    print(f"endpoint={CONFIG.get('transcriptions_url')}", flush=True)
-    print(f"model={CONFIG.get('model')} language={CONFIG.get('language') or '(auto)'}", flush=True)
-    print(f"api_key={mask_secret(CONFIG.get('api_key', ''))}", flush=True)
+    print(f"endpoint={get_config_str('transcriptions_url')}", flush=True)
+    print(f"model={get_config_str('model')} language={get_config_str('language') or '(auto)'}", flush=True)
+    print(f"api_key={mask_secret(get_config_str('api_key'))}", flush=True)
+    print(
+        f"image_provider={get_config_str('image_provider', 'local')} "
+        f"image_model={get_config_str('image_model')}",
+        flush=True,
+    )
+    print(f"image_api_key={mask_secret(get_config_str('image_api_key'))}", flush=True)
     print(f"recordings_dir={RECORDINGS_DIR}", flush=True)
     print(f"sketches_dir={SKETCHES_DIR}", flush=True)
     print_config_warnings()
