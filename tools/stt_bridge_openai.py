@@ -35,6 +35,8 @@ DEFAULT_RECORDINGS_DIR = Path(__file__).with_name("recordings")
 DEFAULT_SKETCHES_DIR = Path(__file__).with_name("sketches")
 SKETCH_WIDTH = 160
 SKETCH_HEIGHT = 160
+PRINT_WIDTH = 384
+PRINT_HEIGHT = 384
 CONFIG: dict[str, str] = {}
 RECORDINGS_DIR = DEFAULT_RECORDINGS_DIR
 SKETCHES_DIR = DEFAULT_SKETCHES_DIR
@@ -98,6 +100,11 @@ def save_recording(wav_bytes: bytes, client_ip: str) -> Path:
         pass
 
     return path
+
+
+def get_bitmap_pixel(bitmap: bytes | bytearray, width: int, x: int, y: int) -> bool:
+    index = y * width + x
+    return (bitmap[index // 8] & (1 << (7 - (index % 8)))) != 0
 
 
 class MonoCanvas:
@@ -337,7 +344,7 @@ def draw_generic(canvas: MonoCanvas) -> None:
     draw_star(canvas)
 
 
-def generate_sketch(text: str) -> dict[str, object]:
+def generate_preview_sketch(text: str) -> dict[str, object]:
     canvas = MonoCanvas(SKETCH_WIDTH, SKETCH_HEIGHT)
     lowered = text.lower()
 
@@ -384,22 +391,67 @@ def generate_sketch(text: str) -> dict[str, object]:
     }
 
 
-def save_sketch_pbm(sketch: dict[str, object], client_ip: str) -> Path:
+def scale_sketch_nearest(sketch: dict[str, object], width: int, height: int) -> dict[str, object]:
+    source_width = int(sketch["width"])
+    source_height = int(sketch["height"])
+    source_bitmap = bytes.fromhex(str(sketch["bitmap"]))
+    canvas = MonoCanvas(width, height)
+
+    for y in range(height):
+        source_y = min(source_height - 1, (y * source_height) // height)
+        for x in range(width):
+            source_x = min(source_width - 1, (x * source_width) // width)
+            if get_bitmap_pixel(source_bitmap, source_width, source_x, source_y):
+                canvas._set_pixel(x, y)
+
+    return {
+        "width": width,
+        "height": height,
+        "format": "1bpp_hex_msb_black1",
+        "title": str(sketch.get("title", "sketch")),
+        "bitmap": canvas.to_hex(),
+    }
+
+
+def generate_print_sketch(preview_sketch: dict[str, object]) -> dict[str, object]:
+    return scale_sketch_nearest(preview_sketch, PRINT_WIDTH, PRINT_HEIGHT)
+
+
+def generate_sketch_pair(text: str) -> tuple[dict[str, object], dict[str, object]]:
+    preview_sketch = generate_preview_sketch(text)
+    print_sketch = generate_print_sketch(preview_sketch)
+    return preview_sketch, print_sketch
+
+
+def save_sketch_pbm(sketch: dict[str, object], client_ip: str, label: str, latest_name: str) -> Path:
     SKETCHES_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     safe_ip = client_ip.replace(":", "_").replace(".", "-")
-    path = SKETCHES_DIR / f"{timestamp}_{safe_ip}.pbm"
+    path = SKETCHES_DIR / f"{timestamp}_{safe_ip}_{label}.pbm"
     width = int(sketch["width"])
     height = int(sketch["height"])
     bitmap = bytes.fromhex(str(sketch["bitmap"]))
     path.write_bytes(f"P4\n{width} {height}\n".encode("ascii") + bitmap)
 
-    latest_path = SKETCHES_DIR / "latest.pbm"
+    latest_path = SKETCHES_DIR / latest_name
     try:
         shutil.copyfile(path, latest_path)
     except OSError:
         pass
     return path
+
+
+def save_sketch_pair(preview_sketch: dict[str, object], print_sketch: dict[str, object], client_ip: str) -> tuple[Path, Path]:
+    preview_path = save_sketch_pbm(preview_sketch, client_ip, "preview", "latest_preview.pbm")
+    print_path = save_sketch_pbm(print_sketch, client_ip, "print", "latest_print.pbm")
+
+    # Backward-compatible alias used by earlier local testing.
+    try:
+        shutil.copyfile(preview_path, SKETCHES_DIR / "latest.pbm")
+    except OSError:
+        pass
+
+    return preview_path, print_path
 
 
 def multipart_form_data(fields: dict[str, str], file_field: str, filename: str, content_type: str, data: bytes) -> tuple[bytes, str]:
@@ -479,10 +531,29 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/draw":
             query = urllib.parse.parse_qs(parsed.query)
             text = query.get("text", ["house"])[0]
-            sketch = generate_sketch(text)
-            saved_path = save_sketch_pbm(sketch, self.client_address[0])
-            print(f"demo sketch: {saved_path}", flush=True)
-            self.send_json(200, {"text": text, "image": sketch})
+            preview_sketch, print_sketch = generate_sketch_pair(text)
+            preview_path, print_path = save_sketch_pair(preview_sketch, print_sketch, self.client_address[0])
+            print(f"demo preview sketch: {preview_path}", flush=True)
+            print(f"demo print sketch: {print_path}", flush=True)
+            self.send_json(200, {
+                "text": text,
+                "image": preview_sketch,
+                "print_image": {
+                    "width": print_sketch["width"],
+                    "height": print_sketch["height"],
+                    "format": print_sketch["format"],
+                    "saved": str(print_path),
+                },
+            })
+            return
+
+        if parsed.path == "/print":
+            query = urllib.parse.parse_qs(parsed.query)
+            text = query.get("text", ["house"])[0]
+            preview_sketch, print_sketch = generate_sketch_pair(text)
+            _, print_path = save_sketch_pair(preview_sketch, print_sketch, self.client_address[0])
+            print(f"print sketch: {print_path}", flush=True)
+            self.send_json(200, {"text": text, "image": print_sketch})
             return
 
         self.send_json(404, {"error": "not found"})
@@ -525,10 +596,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         print(f"transcript: {text}", flush=True)
-        sketch = generate_sketch(text)
-        saved_sketch_path = save_sketch_pbm(sketch, self.client_address[0])
-        print(f"saved sketch: {saved_sketch_path}", flush=True)
-        self.send_json(200, {"text": text, "image": sketch})
+        preview_sketch, print_sketch = generate_sketch_pair(text)
+        preview_path, print_path = save_sketch_pair(preview_sketch, print_sketch, self.client_address[0])
+        print(f"saved preview sketch: {preview_path}", flush=True)
+        print(f"saved print sketch: {print_path}", flush=True)
+        self.send_json(200, {
+            "text": text,
+            "image": preview_sketch,
+            "print_image": {
+                "width": print_sketch["width"],
+                "height": print_sketch["height"],
+                "format": print_sketch["format"],
+                "saved": str(print_path),
+            },
+        })
 
     def send_json(self, status: int, payload: dict[str, object]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

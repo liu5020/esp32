@@ -81,6 +81,7 @@ Current endpoints:
 | --- | --- |
 | `GET /health` | Check whether the local server is running. |
 | `GET /draw?text=cat` | Generate a demo sketch without recording audio. |
+| `GET /print?text=cat` | Generate and return the 384-dot-wide print bitmap. |
 | `POST /stt` | Accept `audio/wav`, run STT, generate a sketch, return JSON. |
 
 Current response shape for sketch-capable calls:
@@ -94,6 +95,12 @@ Current response shape for sketch-capable calls:
     "format": "1bpp_hex_msb_black1",
     "title": "cat",
     "bitmap": "..."
+  },
+  "print_image": {
+    "width": 384,
+    "height": 384,
+    "format": "1bpp_hex_msb_black1",
+    "saved": "tools/sketches/..."
   }
 }
 ```
@@ -106,7 +113,7 @@ real AI drawing.
 ## Server Roadmap
 
 1. Keep the current Python server as the development backend.
-2. Add a stable response contract for both preview and printer bitmaps.
+2. Keep the stable response contract for both preview and printer bitmaps.
 3. Generate and save a 384-dot-wide printer PBM even before the printer arrives.
 4. Replace the local rule-based sketch generator with an AI line-art generator.
 5. Add a job folder or tiny database for history and debugging.

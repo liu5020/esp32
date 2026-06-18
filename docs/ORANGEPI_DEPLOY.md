@@ -13,6 +13,7 @@ not depend on the Windows development computer.
 | Port | `8787` |
 | Health URL | `http://192.168.31.58:8787/health` |
 | Sketch demo URL | `http://192.168.31.58:8787/draw?text=cat` |
+| Print preview URL | `http://192.168.31.58:8787/print?text=cat` |
 | ESP32 STT URL | `http://192.168.31.58:8787/stt` |
 
 The server stores uploaded WAV files in:
@@ -26,6 +27,17 @@ The server stores generated PBM sketch previews in:
 ```text
 ~/voice_ai_mic_server/tools/sketches
 ```
+
+The latest generated images are:
+
+```text
+~/voice_ai_mic_server/tools/sketches/latest_preview.pbm
+~/voice_ai_mic_server/tools/sketches/latest_print.pbm
+~/voice_ai_mic_server/tools/sketches/latest.pbm
+```
+
+`latest_preview.pbm` is the 160x160 screen preview. `latest_print.pbm` is the
+384x384 thermal-printer preview.
 
 ## Files Deployed
 
@@ -79,6 +91,7 @@ From Windows:
 ```powershell
 Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.31.58:8787/health"
 Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.31.58:8787/draw?text=cat"
+Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.31.58:8787/print?text=cat"
 ```
 
 From the Orange Pi:
@@ -86,15 +99,16 @@ From the Orange Pi:
 ```bash
 curl http://127.0.0.1:8787/health
 curl "http://127.0.0.1:8787/draw?text=cat"
+curl "http://127.0.0.1:8787/print?text=cat"
 ```
 
 ## Next Server Step
 
-The next backend feature should be a thermal-printer preview target:
+The backend now creates a thermal-printer preview target:
 
 ```text
 recognized text -> 160x160 screen bitmap + 384-dot-wide printer bitmap
 ```
 
-The 384-dot bitmap can be saved as `tools/sketches/latest_print.pbm` before the
-printer arrives.
+The next backend feature should replace the local rule-based drawing placeholder
+with an AI line-art generator that still outputs clean one-bit bitmaps.

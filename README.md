@@ -188,12 +188,17 @@ fix the microphone wiring/gain/conversion first.
 
 The sketch preview is intentionally black-and-white because the same bitmap
 format can later be sent to a thermal printer. The bridge saves generated PBM
-files under `tools/sketches/` and updates `tools/sketches/latest.pbm`. Send `d`
-in the serial monitor to test the screen drawing path without recording audio.
-The current generator is a local rule-based placeholder for common words such
-as cat, dog, house, tree, flower, car, fish, person, mountain, and star. Replace
-that generator with a real image/LLM service once the screen and printer bitmap
-pipeline is stable.
+files under `tools/sketches/` and updates:
+
+- `tools/sketches/latest_preview.pbm`: 160x160 screen preview.
+- `tools/sketches/latest_print.pbm`: 384x384 thermal-printer preview.
+- `tools/sketches/latest.pbm`: compatibility alias for the screen preview.
+
+Send `d` in the serial monitor to test the screen drawing path without
+recording audio. The current generator is a local rule-based placeholder for
+common words such as cat, dog, house, tree, flower, car, fish, person,
+mountain, and star. Replace that generator with a real image/LLM service once
+the screen and printer bitmap pipeline is stable.
 
 If the ESP32 prints `Could not connect to STT server`, check:
 
