@@ -1,6 +1,11 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include <BLE2902.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <driver/i2s.h>
@@ -46,10 +51,16 @@ static constexpr uint32_t RECORD_SECONDS = 5;
 static constexpr size_t DMA_SAMPLES = 512;
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 static constexpr uint32_t STT_RESPONSE_TIMEOUT_MS = 20000;
+static constexpr size_t BLE_RX_BUFFER_LIMIT = 1024;
 static constexpr uint16_t COLOR_DARK_GREY = 0x4208;
 static constexpr uint16_t SKETCH_WIDTH = 160;
 static constexpr uint16_t SKETCH_HEIGHT = 160;
 static constexpr size_t SKETCH_BITMAP_BYTES = (SKETCH_WIDTH * SKETCH_HEIGHT) / 8;
+
+static const char *BLE_SERVICE_UUID = "7a8f0001-7d2a-4f2c-8f9d-0a1b2c3d4e5f";
+static const char *BLE_CONFIG_WRITE_UUID = "7a8f0002-7d2a-4f2c-8f9d-0a1b2c3d4e5f";
+static const char *BLE_STATUS_NOTIFY_UUID = "7a8f0003-7d2a-4f2c-8f9d-0a1b2c3d4e5f";
+static const char *CONFIG_NAMESPACE = "voicecfg";
 
 // INMP441 sends 24-bit samples in a 32-bit I2S slot. Lower this value if the
 // recording is too quiet; raise it if the waveform clips.
@@ -68,6 +79,17 @@ static bool buttonStableState = HIGH;
 static bool buttonLastReading = HIGH;
 static uint32_t buttonLastChangeMs = 0;
 static uint8_t sketchBitmap[SKETCH_BITMAP_BYTES];
+static String configuredWifiSsid;
+static String configuredWifiPassword;
+static String configuredBackendBaseUrl;
+static bool hasStoredDeviceConfig = false;
+static bool bleClientConnected = false;
+static String bleRxBuffer;
+static bool pendingBleConfig = false;
+static String pendingBleWifiSsid;
+static String pendingBleWifiPassword;
+static String pendingBleBackendBaseUrl;
+static BLECharacteristic *bleStatusCharacteristic = nullptr;
 
 static Adafruit_ST7789 tft =
     Adafruit_ST7789(TFT_CS_PIN, TFT_DC_PIN, TFT_MOSI_PIN, TFT_SCLK_PIN, TFT_RST_PIN);
@@ -77,6 +99,125 @@ struct HttpEndpoint {
   uint16_t port = 80;
   String path = "/";
 };
+
+static String trimTrailingSlashes(String value) {
+  value.trim();
+  while (value.endsWith("/") && value.length() > String("http://").length()) {
+    value.remove(value.length() - 1);
+  }
+  return value;
+}
+
+static String normalizeBackendBaseUrl(String value) {
+  value = trimTrailingSlashes(value);
+  if (value.endsWith("/stt")) {
+    value.remove(value.length() - 4);
+  }
+  return trimTrailingSlashes(value);
+}
+
+static String fallbackBackendBaseUrl() {
+  String value = STT_SERVER_URL;
+  int sttIndex = value.indexOf("/stt");
+  if (sttIndex > 0) {
+    value = value.substring(0, sttIndex);
+  } else {
+    int schemeIndex = value.indexOf("://");
+    int pathIndex = schemeIndex >= 0 ? value.indexOf('/', schemeIndex + 3) : -1;
+    if (pathIndex > 0) {
+      value = value.substring(0, pathIndex);
+    }
+  }
+  return trimTrailingSlashes(value);
+}
+
+static String activeWifiSsid() {
+  return configuredWifiSsid.length() > 0 ? configuredWifiSsid : String(WIFI_SSID);
+}
+
+static String activeWifiPassword() {
+  return configuredWifiPassword.length() > 0 ? configuredWifiPassword : String(WIFI_PASSWORD);
+}
+
+static String activeBackendBaseUrl() {
+  return configuredBackendBaseUrl.length() > 0 ? configuredBackendBaseUrl : fallbackBackendBaseUrl();
+}
+
+static String activeSttServerUrl() {
+  return activeBackendBaseUrl() + "/stt";
+}
+
+static bool loadDeviceConfig() {
+  Preferences prefs;
+  if (!prefs.begin(CONFIG_NAMESPACE, true)) {
+    Serial.println("NVS config open failed; using compile-time fallback.");
+    return false;
+  }
+
+  configuredWifiSsid = prefs.getString("ssid", "");
+  configuredWifiPassword = prefs.getString("pass", "");
+  configuredBackendBaseUrl = normalizeBackendBaseUrl(prefs.getString("backend", ""));
+  prefs.end();
+
+  hasStoredDeviceConfig = configuredWifiSsid.length() > 0 && configuredBackendBaseUrl.length() > 0;
+  if (hasStoredDeviceConfig) {
+    Serial.printf("Loaded BLE/NVS config: ssid=%s backend=%s\n",
+                  configuredWifiSsid.c_str(),
+                  configuredBackendBaseUrl.c_str());
+  } else {
+    Serial.println("No BLE/NVS config found; using include/secrets.h fallback.");
+  }
+  return hasStoredDeviceConfig;
+}
+
+static bool saveDeviceConfig(const String &ssid, const String &password, const String &backendBaseUrl) {
+  Preferences prefs;
+  if (!prefs.begin(CONFIG_NAMESPACE, false)) {
+    Serial.println("NVS config write failed: open error.");
+    return false;
+  }
+
+  String cleanBackend = normalizeBackendBaseUrl(backendBaseUrl);
+  size_t ssidWritten = prefs.putString("ssid", ssid);
+  prefs.putString("pass", password);
+  size_t backendWritten = prefs.putString("backend", cleanBackend);
+  bool ok = ssidWritten > 0 && backendWritten > 0;
+  prefs.end();
+
+  if (ok) {
+    configuredWifiSsid = ssid;
+    configuredWifiPassword = password;
+    configuredBackendBaseUrl = cleanBackend;
+    hasStoredDeviceConfig = true;
+  }
+  return ok;
+}
+
+static bool clearDeviceConfig() {
+  Preferences prefs;
+  if (!prefs.begin(CONFIG_NAMESPACE, false)) {
+    return false;
+  }
+  bool ok = prefs.clear();
+  prefs.end();
+
+  if (ok) {
+    configuredWifiSsid = "";
+    configuredWifiPassword = "";
+    configuredBackendBaseUrl = "";
+    hasStoredDeviceConfig = false;
+  }
+  return ok;
+}
+
+static void printDeviceConfig() {
+  Serial.println("Active device config:");
+  Serial.printf("  source: %s\n", hasStoredDeviceConfig ? "BLE/NVS" : "include/secrets.h fallback");
+  Serial.printf("  ssid: %s\n", activeWifiSsid().c_str());
+  Serial.printf("  backend: %s\n", activeBackendBaseUrl().c_str());
+  Serial.printf("  stt: %s\n", activeSttServerUrl().c_str());
+  Serial.println("  password: <hidden>");
+}
 
 static void putLe16(uint8_t *dst, uint16_t value) {
   dst[0] = static_cast<uint8_t>(value & 0xFF);
@@ -450,7 +591,7 @@ static void drawWifiIcon(int16_t x, int16_t y, uint8_t bars, uint16_t color) {
 }
 
 static String shortSsid() {
-  String ssid = WIFI_SSID;
+  String ssid = activeWifiSsid();
   if (ssid.length() > 17) {
     ssid = ssid.substring(0, 15) + "..";
   }
@@ -543,6 +684,8 @@ static void printHelp() {
   Serial.println();
   Serial.println("Commands:");
   Serial.println("  h - show this help");
+  Serial.println("  p - print active WiFi/backend config");
+  Serial.println("  c - clear BLE/NVS config and use secrets.h fallback");
   Serial.println("  v - toggle live volume meter");
   Serial.println("  w - test WiFi and update the screen");
   Serial.println("  b - test speaker beep");
@@ -555,15 +698,16 @@ static void printHelp() {
 }
 
 static bool isPlaceholderConfig() {
-  return strcmp(WIFI_SSID, "YOUR_WIFI_SSID") == 0 ||
-         strcmp(STT_SERVER_URL, "http://192.168.1.100:8787/stt") == 0;
+  return activeWifiSsid() == "YOUR_WIFI_SSID" ||
+         activeBackendBaseUrl() == fallbackBackendBaseUrl() &&
+             String(STT_SERVER_URL) == "http://192.168.1.100:8787/stt";
 }
 
-static bool parseHttpUrl(const char *url, HttpEndpoint &endpoint) {
+static bool parseHttpUrl(const String &url, HttpEndpoint &endpoint) {
   String value(url);
   const String prefix = "http://";
   if (!value.startsWith(prefix)) {
-    Serial.println("Only http:// STT_SERVER_URL is supported by this firmware starter.");
+    Serial.println("Only http:// backend URLs are supported by this firmware starter.");
     return false;
   }
 
@@ -594,26 +738,28 @@ static bool connectWiFi() {
     return true;
   }
 
-  if (strcmp(WIFI_SSID, "YOUR_WIFI_SSID") == 0) {
-    Serial.println("WiFi is not configured. Edit include/secrets.h first.");
+  String ssid = activeWifiSsid();
+  String password = activeWifiPassword();
+  if (ssid == "YOUR_WIFI_SSID" || ssid.length() == 0) {
+    Serial.println("WiFi is not configured. Use BLE mini program setup or edit include/secrets.h.");
     wifiEverTested = true;
     wifiIsConnected = false;
     wifiLastRssi = -127;
     wifiLastIp = "-";
     showStatus("wifi config?", ST77XX_RED);
-    drawWifiPanel("NO CONFIG", ST77XX_RED, wifiLastRssi, "edit secrets.h");
+    drawWifiPanel("NO CONFIG", ST77XX_RED, wifiLastRssi, "use miniapp");
     return false;
   }
 
   showStatus("wifi...", ST77XX_YELLOW);
   drawWifiPanel("WIFI...", ST77XX_YELLOW, -127, "connecting");
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(ssid.c_str(), password.c_str());
 
   uint32_t startMs = millis();
   uint32_t lastUiMs = 0;
   uint8_t dotCount = 0;
-  Serial.printf("Connecting WiFi: %s", WIFI_SSID);
+  Serial.printf("Connecting WiFi: %s", ssid.c_str());
   while (WiFi.status() != WL_CONNECTED && millis() - startMs < WIFI_CONNECT_TIMEOUT_MS) {
     Serial.print('.');
     if (millis() - lastUiMs > 700) {
@@ -698,7 +844,7 @@ static void fetchDemoSketch() {
   volumeMeterEnabled = false;
 
   if (isPlaceholderConfig()) {
-    Serial.println("Edit include/secrets.h first so the ESP32 knows the bridge URL.");
+    Serial.println("Configure WiFi/backend by BLE mini program first, or edit include/secrets.h.");
     showStatus("set config", ST77XX_RED);
     playErrorSound();
     delay(1200);
@@ -714,7 +860,7 @@ static void fetchDemoSketch() {
   }
 
   HttpEndpoint endpoint;
-  if (!parseHttpUrl(STT_SERVER_URL, endpoint)) {
+  if (!parseHttpUrl(activeBackendBaseUrl(), endpoint)) {
     showStatus("bad url", ST77XX_RED);
     playErrorSound();
     delay(1200);
@@ -909,6 +1055,183 @@ static bool showSketchFromJson(const String &body) {
   return true;
 }
 
+static String bleDeviceName() {
+  uint16_t suffix = static_cast<uint16_t>(ESP.getEfuseMac() & 0xFFFF);
+  char name[24];
+  snprintf(name, sizeof(name), "VoiceSketch-%04X", suffix);
+  return String(name);
+}
+
+static void sendBleStatus(const char *event, const char *message) {
+  if (bleStatusCharacteristic == nullptr) {
+    return;
+  }
+
+  String payload = "{";
+  payload += "\"event\":\"";
+  payload += event;
+  payload += "\",\"message\":\"";
+  payload += message;
+  payload += "\",\"configured\":";
+  payload += hasStoredDeviceConfig ? "true" : "false";
+  payload += ",\"wifi\":\"";
+  payload += wifiIsConnected ? "connected" : "disconnected";
+  payload += "\",\"ip\":\"";
+  payload += wifiLastIp;
+  payload += "\",\"rssi\":";
+  payload += String(wifiLastRssi);
+  payload += ",\"backend\":\"";
+  payload += activeBackendBaseUrl();
+  payload += "\"}";
+
+  bleStatusCharacteristic->setValue(payload.c_str());
+  if (bleClientConnected) {
+    bleStatusCharacteristic->notify();
+  }
+}
+
+static void queueBleConfigMessage(const String &message) {
+  String ssid = extractJsonStringField(message, "ssid");
+  String password = extractJsonStringField(message, "password");
+  String backendBaseUrl = extractJsonStringField(message, "base_url");
+  if (backendBaseUrl.length() == 0) {
+    backendBaseUrl = extractJsonStringField(message, "backend_url");
+  }
+
+  backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrl);
+  if (ssid.length() == 0 || backendBaseUrl.length() == 0) {
+    Serial.println("BLE config rejected: missing ssid or backend base URL.");
+    sendBleStatus("config_error", "missing ssid or backend");
+    return;
+  }
+
+  if (!backendBaseUrl.startsWith("http://")) {
+    Serial.println("BLE config rejected: only http:// backend URLs are supported.");
+    sendBleStatus("config_error", "backend must start with http://");
+    return;
+  }
+
+  pendingBleWifiSsid = ssid;
+  pendingBleWifiPassword = password;
+  pendingBleBackendBaseUrl = backendBaseUrl;
+  pendingBleConfig = true;
+
+  Serial.printf("BLE config received: ssid=%s backend=%s\n",
+                ssid.c_str(),
+                backendBaseUrl.c_str());
+  sendBleStatus("config_received", "saving");
+}
+
+class VoiceSketchBleServerCallbacks : public BLEServerCallbacks {
+public:
+  void onConnect(BLEServer *server) override {
+    (void)server;
+    bleClientConnected = true;
+    Serial.println("BLE client connected.");
+    sendBleStatus("connected", "ble connected");
+  }
+
+  void onDisconnect(BLEServer *server) override {
+    (void)server;
+    bleClientConnected = false;
+    Serial.println("BLE client disconnected; advertising again.");
+    BLEDevice::startAdvertising();
+  }
+};
+
+class VoiceSketchConfigWriteCallbacks : public BLECharacteristicCallbacks {
+public:
+  void onWrite(BLECharacteristic *characteristic) override {
+    auto raw = characteristic->getValue();
+    if (raw.length() == 0) {
+      return;
+    }
+
+    for (size_t i = 0; i < raw.length(); i++) {
+      char c = raw[i];
+      if (c == '\n' || c == '\r') {
+        String message = bleRxBuffer;
+        message.trim();
+        bleRxBuffer = "";
+        if (message.length() > 0) {
+          queueBleConfigMessage(message);
+        }
+      } else {
+        bleRxBuffer += c;
+        if (bleRxBuffer.length() > BLE_RX_BUFFER_LIMIT) {
+          bleRxBuffer = "";
+          Serial.println("BLE config rejected: message too long.");
+          sendBleStatus("config_error", "message too long");
+        }
+      }
+    }
+  }
+};
+
+static void initBleConfigService() {
+  String name = bleDeviceName();
+  BLEDevice::init(name.c_str());
+
+  BLEServer *server = BLEDevice::createServer();
+  server->setCallbacks(new VoiceSketchBleServerCallbacks());
+
+  BLEService *service = server->createService(BLE_SERVICE_UUID);
+  BLECharacteristic *writeCharacteristic = service->createCharacteristic(
+      BLE_CONFIG_WRITE_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  writeCharacteristic->setCallbacks(new VoiceSketchConfigWriteCallbacks());
+
+  bleStatusCharacteristic = service->createCharacteristic(
+      BLE_STATUS_NOTIFY_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  bleStatusCharacteristic->addDescriptor(new BLE2902());
+
+  service->start();
+
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  advertising->addServiceUUID(BLE_SERVICE_UUID);
+  advertising->setScanResponse(true);
+  advertising->setMinPreferred(0x06);
+  advertising->setMaxPreferred(0x12);
+  BLEDevice::startAdvertising();
+
+  Serial.printf("BLE config service advertising as %s\n", name.c_str());
+  sendBleStatus("advertising", "ready");
+}
+
+static void handlePendingBleConfig() {
+  if (!pendingBleConfig) {
+    return;
+  }
+
+  String ssid = pendingBleWifiSsid;
+  String password = pendingBleWifiPassword;
+  String backendBaseUrl = pendingBleBackendBaseUrl;
+  pendingBleConfig = false;
+
+  showStatus("ble config", ST77XX_CYAN);
+  bool saved = saveDeviceConfig(ssid, password, backendBaseUrl);
+  if (!saved) {
+    Serial.println("BLE config save failed.");
+    sendBleStatus("config_error", "save failed");
+    showStatus("save error", ST77XX_RED);
+    delay(1200);
+    showReadyScreen();
+    return;
+  }
+
+  Serial.println("BLE config saved to NVS.");
+  printDeviceConfig();
+  sendBleStatus("config_saved", "wifi connecting");
+
+  WiFi.disconnect();
+  delay(250);
+  bool connected = connectWiFi();
+  sendBleStatus(connected ? "wifi_ok" : "wifi_failed", connected ? "connected" : "check ssid/password");
+  delay(1000);
+  showReadyScreen();
+}
+
 static bool streamWavToClient(WiFiClient &client, uint32_t seconds) {
   uint32_t totalSamples = SAMPLE_RATE * seconds;
   uint32_t dataBytes = totalSamples * sizeof(int16_t);
@@ -942,7 +1265,7 @@ static void recordAndSendToStt(uint32_t seconds) {
   volumeMeterEnabled = false;
 
   if (isPlaceholderConfig()) {
-    Serial.println("Edit include/secrets.h: set WIFI_SSID, WIFI_PASSWORD, and STT_SERVER_URL.");
+    Serial.println("Configure WiFi/backend by BLE mini program first, or edit include/secrets.h.");
     showStatus("set config", ST77XX_RED);
     playErrorSound();
     delay(1200);
@@ -958,7 +1281,8 @@ static void recordAndSendToStt(uint32_t seconds) {
   }
 
   HttpEndpoint endpoint;
-  if (!parseHttpUrl(STT_SERVER_URL, endpoint)) {
+  String sttServerUrl = activeSttServerUrl();
+  if (!parseHttpUrl(sttServerUrl, endpoint)) {
     showStatus("bad url", ST77XX_RED);
     playErrorSound();
     delay(1200);
@@ -987,7 +1311,7 @@ static void recordAndSendToStt(uint32_t seconds) {
 
   Serial.printf("Recording and uploading %lu seconds to %s\n",
                 static_cast<unsigned long>(seconds),
-                STT_SERVER_URL);
+                sttServerUrl.c_str());
   showStatus("speak now", ST77XX_CYAN);
   playStartSound();
 
@@ -1116,6 +1440,23 @@ static void handleSerialCommands() {
     case 'H':
       printHelp();
       break;
+    case 'p':
+    case 'P':
+      printDeviceConfig();
+      break;
+    case 'c':
+    case 'C':
+      if (clearDeviceConfig()) {
+        Serial.println("BLE/NVS config cleared. Reboot or press w to test fallback config.");
+        showStatus("config clear", ST77XX_YELLOW);
+        sendBleStatus("config_cleared", "using fallback");
+        delay(1000);
+        showReadyScreen();
+      } else {
+        Serial.println("Failed to clear BLE/NVS config.");
+        showStatus("clear failed", ST77XX_RED);
+      }
+      break;
     case 'v':
     case 'V':
       volumeMeterEnabled = !volumeMeterEnabled;
@@ -1161,9 +1502,11 @@ void setup() {
                 MIC_SCK_PIN,
                 MIC_WS_PIN,
                 MIC_SD_PIN);
+  loadDeviceConfig();
 
   initDisplay();
   initButton();
+  initBleConfigService();
   speakerReady = initSpeakerI2S();
   Serial.printf("Speaker: %s (BCLK=%d, LRC=%d, DIN=%d)\n",
                 speakerReady ? "ready" : "disabled/error",
@@ -1186,6 +1529,7 @@ void setup() {
   }
 
   Serial.println("Microphone ready.");
+  printDeviceConfig();
   playReadySound();
   connectWiFi();
   showReadyScreen();
@@ -1193,6 +1537,7 @@ void setup() {
 }
 
 void loop() {
+  handlePendingBleConfig();
   handleButton();
   handleSerialCommands();
 

@@ -125,8 +125,8 @@ then convert it to one-bit preview and printer bitmaps.
 4. Tune the AI line-art prompt and bitmap threshold using real screen and print
    samples.
 5. Add a job folder or tiny database for history and debugging.
-6. Add BLE-based configuration later so the mobile app can set WiFi and server
-   URL without editing firmware headers.
+6. Test the BLE-based configuration path from the mini program on a real phone,
+   then add backend configuration endpoints for model/provider settings.
 7. Deploy the Python backend to a real server or package it as a local demo
    service for graduation presentation.
 
@@ -135,6 +135,6 @@ then convert it to one-bit preview and printer bitmaps.
 1. Print path preparation: make the server create a 384-dot-wide print bitmap.
 2. Thermal printer bring-up: send text first, then bitmap.
 3. AI sketch provider: use the recognized text to produce better line art.
-4. BLE provisioning: let the phone configure WiFi and server URL.
+4. BLE provisioning test: confirm the phone can configure WiFi and server URL.
 5. Enclosure and PCB: finalize only after the printer, screen, button, and power
    layout are physically confirmed.

@@ -183,13 +183,15 @@ Optional fields:
 
 ## First Implementation Milestone
 
-Before building a full mini program UI, implement the backend config endpoints
-and a tiny test client page.
+The first mini program scaffold exists under `miniapp/`, and the ESP32 firmware
+now exposes the BLE provisioning service described above. The remaining work is
+to connect the mini program to the backend config endpoints and test BLE writes
+on a real phone.
 
 Recommended order:
 
-1. Add backend `/config` GET with safe fields only.
-2. Add backend `/config` POST for non-secret mode/model/style fields.
-3. Add backend `/config/key` POST for API keys.
-4. Add ESP32 BLE config service for WiFi and backend URL.
-5. Build mini program pages around those stable contracts.
+1. Test mini program BLE scan/connect/write on a real phone.
+2. Add backend `/config` GET with safe fields only.
+3. Add backend `/config` POST for non-secret mode/model/style fields.
+4. Add backend `/config/key` POST for API keys.
+5. Bind the mini program advanced/settings pages to those stable contracts.

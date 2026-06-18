@@ -42,8 +42,8 @@ does not require TDesign components to run.
 
 ## Current Limits
 
-- ESP32 BLE config firmware is not implemented yet, so BLE write is a protocol
-  placeholder matching `docs/MINIPROGRAM_CONFIG.md`.
+- ESP32 BLE config firmware is implemented, but it still needs real-phone
+  testing through WeChat DevTools preview or a development build.
 - Backend `/config` and `/latest` endpoints are planned but not required for
   the current test page.
 - API keys should stay on the Orange Pi backend. Do not store them in the mini

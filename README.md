@@ -82,6 +82,8 @@ Open the serial monitor at `921600` baud.
 | Command | Action |
 | --- | --- |
 | `h` | Show help |
+| `p` | Print active WiFi/backend config without showing the password |
+| `c` | Clear BLE/NVS config and use the `include/secrets.h` fallback |
 | `v` | Toggle live volume meter |
 | `w` | Test WiFi and update the screen |
 | `b` | Test the speaker beep |
@@ -116,10 +118,10 @@ switching the channel format as described above.
 
 ## WiFi Test Screen
 
-On boot, the firmware tries to connect to WiFi once and keeps the result on the
-screen:
+On boot, the firmware starts a BLE configuration service, then tries to connect
+to WiFi once and keeps the result on the screen:
 
-- `NO CONFIG`: edit `include/secrets.h`.
+- `NO CONFIG`: send config from the mini program, or edit `include/secrets.h`.
 - `WIFI OK`: connected. The screen shows IP, RSSI, and a four-bar signal icon.
 - `FAILED`: SSID/password, signal, or router compatibility problem.
 
@@ -128,13 +130,54 @@ Send `w` in the serial monitor to test WiFi again.
 ESP32-S3 connects to 2.4 GHz WiFi. A router that uses the same SSID for 2.4 GHz
 and 5 GHz is usually fine as long as the 2.4 GHz radio is enabled.
 
+## BLE Provisioning
+
+The firmware advertises a BLE device named `VoiceSketch-XXXX`, where `XXXX` is
+based on the ESP32 chip ID. The mini program can scan for that name and write
+WiFi/backend settings to the device. The ESP32 saves those settings in NVS, so
+they survive reboot and firmware upload.
+
+BLE service:
+
+| Item | UUID |
+| --- | --- |
+| Service | `7a8f0001-7d2a-4f2c-8f9d-0a1b2c3d4e5f` |
+| Config write | `7a8f0002-7d2a-4f2c-8f9d-0a1b2c3d4e5f` |
+| Status notify/read | `7a8f0003-7d2a-4f2c-8f9d-0a1b2c3d4e5f` |
+
+The config write characteristic accepts one newline-terminated JSON message:
+
+```json
+{
+  "version": 1,
+  "type": "device_config",
+  "payload": {
+    "wifi": {
+      "ssid": "Xiaomi_F165",
+      "password": "..."
+    },
+    "backend": {
+      "base_url": "http://192.168.31.58:8787"
+    }
+  }
+}
+```
+
+The parser looks for `ssid`, `password`, and `base_url` anywhere in the message.
+The backend value should be the base URL, not `/stt`; if `/stt` is included by
+mistake, the firmware strips it and appends `/stt` when uploading audio.
+
+Use serial command `p` to check the active config source, and `c` to clear the
+saved BLE config and fall back to `include/secrets.h`.
+
 ## Speech To Text
 
 The firmware sends WAV audio to a local HTTP bridge instead of putting an AI API
 key on the ESP32.
 
-1. Copy `include/secrets.example.h` to `include/secrets.h`, then edit
-   `include/secrets.h`.
+1. For the old development path, copy `include/secrets.example.h` to
+   `include/secrets.h`, then edit `include/secrets.h`. For the new preferred
+   path, use the mini program to send WiFi and backend settings over BLE.
 
    ```cpp
    #define WIFI_SSID "your wifi"
