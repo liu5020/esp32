@@ -59,7 +59,7 @@ static constexpr uint16_t WAV_CHANNELS = 1;
 static constexpr uint32_t RECORD_SECONDS = 5;
 static constexpr size_t DMA_SAMPLES = 512;
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
-static constexpr uint32_t STT_RESPONSE_TIMEOUT_MS = 20000;
+static constexpr uint32_t STT_RESPONSE_TIMEOUT_MS = 90000;
 static constexpr size_t BLE_RX_BUFFER_LIMIT = 1024;
 static constexpr uint16_t COLOR_DARK_GREY = 0x4208;
 static constexpr uint16_t SKETCH_WIDTH = 160;
@@ -77,7 +77,7 @@ static constexpr int SAMPLE_SHIFT = 14;
 
 static int32_t rawBuffer[DMA_SAMPLES];
 static int16_t pcmBuffer[DMA_SAMPLES];
-static bool volumeMeterEnabled = true;
+static bool volumeMeterEnabled = false;
 static uint32_t lastDisplayUpdateMs = 0;
 static bool wifiEverTested = false;
 static bool wifiIsConnected = false;
@@ -864,20 +864,46 @@ static void runWifiScreenTest() {
 static String readHttpResponse(WiFiClient &client, uint32_t timeoutMs) {
   String response;
   uint32_t deadline = millis() + timeoutMs;
+  uint32_t disconnectedAt = 0;
 
   while (millis() < deadline) {
+    bool readAny = false;
     while (client.available() > 0) {
       response += static_cast<char>(client.read());
+      readAny = true;
       deadline = millis() + 1500;
     }
 
-    if (!client.connected() && client.available() == 0) {
-      break;
+    if (readAny) {
+      disconnectedAt = 0;
+      continue;
     }
+
+    if (!client.connected()) {
+      if (disconnectedAt == 0) {
+        disconnectedAt = millis();
+      } else if (millis() - disconnectedAt > 1500) {
+        break;
+      }
+    } else {
+      disconnectedAt = 0;
+    }
+
     delay(10);
   }
 
   return response;
+}
+
+static String httpStatusLineFromResponse(const String &response) {
+  int lineEnd = response.indexOf("\r\n");
+  if (lineEnd < 0) {
+    lineEnd = response.indexOf('\n');
+  }
+  if (lineEnd < 0) {
+    return response.substring(0, 80);
+  }
+  return response.substring(0, lineEnd);
 }
 
 static String httpBodyFromResponse(const String &response) {
@@ -946,6 +972,12 @@ static void fetchDemoSketch() {
   String body = httpBodyFromResponse(response);
   body.trim();
   Serial.println("Sketch demo response:");
+  Serial.printf("HTTP response bytes: %d\n", response.length());
+  if (response.length() > 0) {
+    Serial.println(httpStatusLineFromResponse(response));
+  } else {
+    Serial.println("No HTTP response received before timeout or TLS close.");
+  }
   Serial.println(body);
 
   if (showSketchFromJson(body)) {
@@ -1398,6 +1430,12 @@ static void recordAndSendToStt(uint32_t seconds) {
   String body = httpBodyFromResponse(response);
   body.trim();
   Serial.println("STT response:");
+  Serial.printf("HTTP response bytes: %d\n", response.length());
+  if (response.length() > 0) {
+    Serial.println(httpStatusLineFromResponse(response));
+  } else {
+    Serial.println("No HTTP response received before timeout or TLS close.");
+  }
   Serial.println(body);
 
   String text = extractJsonTextField(body);

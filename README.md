@@ -71,9 +71,10 @@ Notes:
   speaker shown in the project notes needs an amplifier module such as
   MAX98357A, PAM8403, or NS4168. Speaker beeps are disabled in code until an
   amplifier module is connected.
-- After flashing, the screen should show `VOICE MIC`, `mic ready`, and a live
-  level bar. If the screen is blank, first check whether the firmware actually
-  uploaded, then check the screen `BL` pin.
+- After flashing, the screen should show `VOICE MIC` and `mic ready`. The live
+  level meter is off by default; press `v` in the serial monitor to enable it.
+  If the screen is blank, first check whether the firmware actually uploaded,
+  then check the screen `BL` pin.
 
 ## Serial Commands
 
