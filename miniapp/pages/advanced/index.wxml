@@ -1,0 +1,30 @@
+<view class="page">
+  <view class="hero">
+    <view class="eyebrow">Advanced</view>
+    <view class="title">高级设置</view>
+    <view class="subtle">这里先放会变动的参数，避免每次改固件。</view>
+  </view>
+
+  <view class="panel">
+    <view class="field">
+      <view class="field-label">STT 路径</view>
+      <input class="input mono" value="{{sttPath}}" bindinput="onInput" data-key="sttPath" />
+    </view>
+    <view class="field">
+      <view class="field-label">绘图路径</view>
+      <input class="input mono" value="{{drawPath}}" bindinput="onInput" data-key="drawPath" />
+    </view>
+    <view class="field">
+      <view class="field-label">二值化阈值：{{imageThreshold}}</view>
+      <slider min="120" max="245" step="1" value="{{imageThreshold}}" activeColor="#226b5a" bindchange="onThresholdChange" />
+    </view>
+    <view class="row">
+      <view class="label">启用打印测试</view>
+      <switch checked="{{printEnabled}}" color="#226b5a" bindchange="onPrintChange" />
+    </view>
+    <view class="actions">
+      <button class="btn primary" bindtap="saveLocal">保存本机</button>
+      <button class="btn secondary" bindtap="pushBackend">同步后端</button>
+    </view>
+  </view>
+</view>

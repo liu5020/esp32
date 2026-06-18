@@ -8,6 +8,11 @@ recognition.
 Project architecture and graduation-design roadmap are recorded in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+The first WeChat mini program scaffold lives in [`miniapp`](miniapp). It is a
+configuration console for BLE provisioning, backend URL setup, AI mode
+selection, and backend testing. See [`miniapp/README.md`](miniapp/README.md) for
+opening it in WeChat DevTools.
+
 ## Wiring
 
 The microphone pins are chosen to avoid the TFT screen wiring you already used.

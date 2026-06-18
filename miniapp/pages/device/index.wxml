@@ -1,0 +1,55 @@
+<view class="page">
+  <view class="hero">
+    <view class="eyebrow">Voice Sketch</view>
+    <view class="title">设备连接</view>
+    <view class="subtle">扫描 ESP32，连接后可以发送 WiFi 和后端地址。</view>
+  </view>
+
+  <view class="panel">
+    <view class="row">
+      <view class="label">BLE 状态</view>
+      <view class="status-pill {{connected ? '' : 'off'}}">{{connected ? '已连接' : '未连接'}}</view>
+    </view>
+    <view class="row">
+      <view class="label">后端地址</view>
+      <view class="value mono">{{config.backend.baseUrl}}</view>
+    </view>
+    <view class="actions">
+      <button class="btn primary" bindtap="handleScan" loading="{{scanning}}">扫描设备</button>
+      <button class="btn secondary" bindtap="go" data-path="/pages/test/index">测试后端</button>
+    </view>
+  </view>
+
+  <view class="panel" wx:if="{{devices.length}}">
+    <view class="section-title">附近设备</view>
+    <view
+      class="list-item"
+      wx:for="{{devices}}"
+      wx:key="deviceId"
+      bindtap="handleConnect"
+      data-device-id="{{item.deviceId}}"
+    >
+      <view class="label">{{item.localName || item.name || '未命名设备'}}</view>
+      <view class="subtle mono">{{item.deviceId}}</view>
+    </view>
+  </view>
+
+  <view class="nav-grid">
+    <view class="nav-card" bindtap="go" data-path="/pages/network/index">
+      <view class="nav-card-title">网络</view>
+      <view class="nav-card-desc">WiFi 和后端 URL</view>
+    </view>
+    <view class="nav-card" bindtap="go" data-path="/pages/ai-mode/index">
+      <view class="nav-card-title">AI 模式</view>
+      <view class="nav-card-desc">本地、云端或自定义</view>
+    </view>
+    <view class="nav-card" bindtap="go" data-path="/pages/advanced/index">
+      <view class="nav-card-title">高级</view>
+      <view class="nav-card-desc">接口和阈值</view>
+    </view>
+    <view class="nav-card" bindtap="go" data-path="/pages/test/index">
+      <view class="nav-card-title">测试</view>
+      <view class="nav-card-desc">健康检查和画图</view>
+    </view>
+  </view>
+</view>

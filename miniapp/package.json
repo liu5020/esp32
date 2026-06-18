@@ -1,0 +1,9 @@
+{
+  "name": "voice-sketch-miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WeChat mini program scaffold for ESP32 voice sketch printer configuration.",
+  "dependencies": {
+    "tdesign-miniprogram": "latest"
+  }
+}

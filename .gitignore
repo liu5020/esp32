@@ -10,3 +10,8 @@ tools/sketches/
 # Python cache files from the bridge script.
 __pycache__/
 *.py[cod]
+
+# WeChat mini program local build output and per-machine settings.
+miniapp/node_modules/
+miniapp/miniprogram_npm/
+miniapp/project.private.config.json

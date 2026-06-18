@@ -1,0 +1,27 @@
+<view class="page">
+  <view class="hero">
+    <view class="eyebrow">Backend Test</view>
+    <view class="title">后端测试</view>
+    <view class="subtle">手机连同一个局域网时，可以直接测香橙派接口。</view>
+  </view>
+
+  <view class="panel">
+    <view class="row">
+      <view class="label">后端</view>
+      <view class="value mono">{{baseUrl}}</view>
+    </view>
+    <view class="field">
+      <view class="field-label">绘图提示词</view>
+      <input class="input" value="{{prompt}}" bindinput="onPromptInput" />
+    </view>
+    <view class="actions">
+      <button class="btn secondary" bindtap="testHealth" loading="{{loadingHealth}}">健康检查</button>
+      <button class="btn primary" bindtap="testDraw" loading="{{loadingDraw}}">生成测试</button>
+    </view>
+  </view>
+
+  <view class="panel" wx:if="{{result}}">
+    <view class="section-title">返回结果</view>
+    <textarea class="textarea mono" value="{{result}}" disabled />
+  </view>
+</view>

@@ -1,0 +1,4 @@
+.list-item:active,
+.nav-card:active {
+  background: #f0e7d7;
+}

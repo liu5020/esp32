@@ -1,0 +1,36 @@
+<view class="page">
+  <view class="hero">
+    <view class="eyebrow">Backend Mode</view>
+    <view class="title">AI 模式</view>
+    <view class="subtle">先只保存模式，真正的 Key 和模型文件仍由香橙派管理。</view>
+  </view>
+
+  <view class="panel">
+    <view class="section-title">选择模式</view>
+    <radio-group bindchange="onModeChange">
+      <label class="list-item" wx:for="{{modes}}" wx:key="id">
+        <radio value="{{item.id}}" checked="{{item.id === aiMode}}" color="#226b5a" />
+        <view class="label">{{item.label}}</view>
+        <view class="subtle">{{item.description}}</view>
+      </label>
+    </radio-group>
+  </view>
+
+  <view class="panel">
+    <view class="row">
+      <view class="label">STT</view>
+      <view class="value mono">{{sttProvider}}</view>
+    </view>
+    <view class="row">
+      <view class="label">失败兜底</view>
+      <view class="value mono">{{sttFallbackProvider || '无'}}</view>
+    </view>
+    <view class="row">
+      <view class="label">图片</view>
+      <view class="value mono">{{imageProvider}}</view>
+    </view>
+    <view class="actions">
+      <button class="btn primary" bindtap="saveMode">保存模式</button>
+    </view>
+  </view>
+</view>

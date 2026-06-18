@@ -1,0 +1,17 @@
+{
+  "pages": [
+    "pages/device/index",
+    "pages/network/index",
+    "pages/ai-mode/index",
+    "pages/advanced/index",
+    "pages/test/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "语音画纸配置",
+    "navigationBarBackgroundColor": "#f7f3ea",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f7f3ea"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}
